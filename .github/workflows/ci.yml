@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -r apps/server/requirements.txt -r apps/server/requirements-dev.txt
+      - name: Run offline suite (mocks/unit; live credentials never required)
+        id: offline-suite
+        run: |
+          cd apps/server
+          set +e
+          python -m pytest -q --tb=long -p no:cacheprovider 2>&1 | tee /tmp/pytest-out.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            echo "::error::pytest exited with code $rc"
+            {
+              echo "## Backend pytest failed (exit $rc)"
+              echo '```'
+              tail -120 /tmp/pytest-out.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $rc
+      - name: Upload pytest log on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest-log
+          path: /tmp/pytest-out.log
+          if-no-files-found: ignore
+
+  # Offline backend tests are the submission contract; live credentials are never required.
+
+  frontend-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+      - name: Install dependencies (pnpm workspace)
+        run: pnpm install --frozen-lockfile
+      - name: Build Web
+        run: pnpm --filter web build

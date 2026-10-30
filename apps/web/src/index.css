@@ -1,0 +1,122 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  background: #0b1020;
+  color: #E5E7EB;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+#root { min-height: 100vh; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ===== 终版契约③: TasteBridge text-node star graph + reveal-on-arrival =====
+   Text nodes stagger in 200ms apart (tb-node-in) while their edges slow-draw
+   (tb-edge-draw). SVG line elements animate stroke-dashoffset; node groups
+   animate opacity so nothing pops abruptly.
+   reveal-on-arrival (the `reveal` prop): whenever the graph data changes — e.g.
+   right after the USER's own cross-domain search — nodes/edges assemble
+   progressively for EVERY persona (Maria's dot constellation included).
+   `animateText` gates ONLY the text-labeled node style (custom personas). */
+@keyframes tb-node-in {
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes tb-edge-draw {
+  0% { stroke-dashoffset: 420; opacity: 0.1; }
+  60% { opacity: 0.45; }
+  100% { stroke-dashoffset: 0; opacity: 0.45; }
+}
+.tb-node-in {
+  animation: tb-node-in 0.45s ease-out forwards;
+}
+.tb-edge-draw {
+  stroke-dasharray: 420;
+  animation: tb-edge-draw 1.4s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tb-node-in, .tb-edge-draw { animation: none !important; }
+  .tb-edge-draw { stroke-dashoffset: 0; }
+}
+
+
+::selection {
+  background: #FF6B3544;
+  color: #fff;
+}
+
+input:focus, textarea:focus {
+  border-color: #FF6B35 !important;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  body { font-size: 14px; }
+}
+
+/* ===== A11y: senior-friendly themes + read-aloud helpers =====
+   The A11yToolbar toggles these classes on <body>. We intentionally override
+   inline styles with !important so the high-contrast / sepia / blue themes win
+   over per-component colors — the whole point is the senior's preference wins. */
+
+.app-content { transition: zoom 0.15s ease; }
+
+/* 1) High contrast — black background, pure white text, yellow accents. */
+body.a11y-theme-high-contrast { background: #000 !important; color: #fff !important; }
+body.a11y-theme-high-contrast,
+body.a11y-theme-high-contrast * {
+  background-color: #000 !important;
+  background-image: none !important;
+  color: #fff !important;
+  border-color: #fff !important;
+  box-shadow: none !important;
+}
+body.a11y-theme-high-contrast button,
+body.a11y-theme-high-contrast a,
+body.a11y-theme-high-contrast summary { color: #FFD60A !important; border-color: #FFD60A !important; }
+
+/* 2) Sepia — warm yellow paper tone, dark grey text (less glare). */
+body.a11y-theme-sepia { background: #F5EBC8 !important; color: #3E2E17 !important; }
+body.a11y-theme-sepia,
+body.a11y-theme-sepia * {
+  background-color: #F5EBC8 !important;
+  background-image: none !important;
+  color: #3E2E17 !important;
+  border-color: #3E2E17 !important;
+  box-shadow: none !important;
+}
+body.a11y-theme-sepia button,
+body.a11y-theme-sepia a,
+body.a11y-theme-sepia summary { color: #7A2E0E !important; font-weight: 700 !important; }
+
+/* 3) Blue — deep blue background, pale blue text (macular-degeneration friendly). */
+body.a11y-theme-blue { background: #0B1E3F !important; color: #E7F3FF !important; }
+body.a11y-theme-blue,
+body.a11y-theme-blue * {
+  background-color: #0B1E3F !important;
+  background-image: none !important;
+  color: #E7F3FF !important;
+  border-color: #E7F3FF !important;
+  box-shadow: none !important;
+}
+body.a11y-theme-blue button,
+body.a11y-theme-blue a,
+body.a11y-theme-blue summary { color: #FFD60A !important; }
+
+/* Sentence currently being read aloud — outline + tint follows the voice. */
+.a11y-sentence-active {
+  outline: 3px solid #F5A623 !important;
+  outline-offset: 2px !important;
+  background: rgba(245, 166, 35, 0.14) !important;
+  border-radius: 6px !important;
+  transition: background 0.2s ease, outline-color 0.2s ease;
+}
+body.a11y-theme-high-contrast .a11y-sentence-active,
+body.a11y-theme-blue .a11y-sentence-active { outline-color: #FFD60A !important; }
+body.a11y-theme-sepia .a11y-sentence-active { outline-color: #B06A00 !important; }

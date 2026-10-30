@@ -1,0 +1,82 @@
+{
+  "version": "1.0.0",
+  "_comment": "冻结的演示商品目录 fixture；外部搜索不可用时作为稳定的本地数据源。",
+  "generated_from": {
+    "personas": ["Maria (68, NYC, Sinatra+Italian, low-sodium)", "Hiroshi (81, Boston, Old Hollywood+Jiangnan)"],
+    "anchors_used": ["Frank Sinatra", "Italian cuisine", "Jazz music", "Roman Holiday", "Jiangnan cuisine", "soups"]
+  },
+  "items": [
+    {
+      "id": "item-001",
+      "name": "Sinatra 经典爵士音乐会门票",
+      "category": "music",
+      "price": 45.00,
+      "currency": "USD",
+      "tags": ["Frank Sinatra", "Jazz", "swing", "live music", "concert"],
+      "description": "Frank Sinatra 风格爵士致敬音乐会，纽约卡内基俱乐部，低音量、前排座位可选"
+    },
+    {
+      "id": "item-002",
+      "name": "Little Italy 低钠意餐双人套餐",
+      "category": "dining",
+      "price": 32.00,
+      "currency": "USD",
+      "tags": ["Italian cuisine", "pasta", "low sodium", "mushroom risotto", "basil"],
+      "description": "曼哈顿小意大利老字号，低钠烹调可选，软糯口感，适合咀嚼不便的长者"
+    },
+    {
+      "id": "item-003",
+      "name": "Roman Holiday 4K 修复版蓝光",
+      "category": "film",
+      "price": 19.99,
+      "currency": "USD",
+      "tags": ["Roman Holiday", "Old Hollywood", "Audrey Hepburn", "classic film"],
+      "description": "奥黛丽·赫本经典老片 4K 修复收藏版，含花絮字幕"
+    },
+    {
+      "id": "item-004",
+      "name": "江南风味低糖点心礼盒",
+      "category": "dining",
+      "price": 22.50,
+      "currency": "USD",
+      "tags": ["Jiangnan cuisine", "light", "low sugar", "dim sum", "green tea"],
+      "description": "苏式低糖绿豆糕、碧螺春绿茶饼干，江南口味，控糖配方"
+    },
+    {
+      "id": "item-005",
+      "name": "社区食堂爱心捐款",
+      "category": "donation",
+      "price": 10.00,
+      "currency": "USD",
+      "tags": ["community", "charity", "senior meal", "donation"],
+      "description": "为社区独居老人提供热餐的一次性捐款（非营利合作方）"
+    },
+    {
+      "id": "item-006",
+      "name": "老爵士黑胶唱片精选盒",
+      "category": "merch",
+      "price": 38.00,
+      "currency": "USD",
+      "tags": ["Jazz", "vinyl", "Frank Sinatra", "Ella Fitzgerald"],
+      "description": "50-60年代爵士黑胶复刻精选，含 Sinatra 与 Ella 经典曲目"
+    },
+    {
+      "id": "item-007",
+      "name": "慢炖菌菇养生汤料包(含低钠)",
+      "category": "dining",
+      "price": 15.00,
+      "currency": "USD",
+      "tags": ["soups", "mushroom", "low sodium", "healthy", "Jiangnan"],
+      "description": "江南风味菌菇汤料包，低钠配方，适合长者日常慢炖"
+    },
+    {
+      "id": "item-008",
+      "name": "艾拉·菲茨杰拉德演唱会门票",
+      "category": "music",
+      "price": 55.00,
+      "currency": "USD",
+      "tags": ["Ella Fitzgerald", "Jazz", "scat", "live music"],
+      "description": "爵士名伶风格致敬演唱会，设无障碍席位，音量友好"
+    }
+  ]
+}

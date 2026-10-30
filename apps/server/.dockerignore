@@ -1,0 +1,18 @@
+# Lean deploy image: exclude local dev noise to keep COPY . . small and safe
+**/__pycache__/
+*.pyc
+.env
+.alembic_env
+data/*
+logs/*
+memory_store/*
+models/*
+*.zip
+*.log
+.pytest_cache/
+tests/
+docs/
+scripts/*.ps1
+scripts/download_rag_models.py
+.well-known/
+node_modules/

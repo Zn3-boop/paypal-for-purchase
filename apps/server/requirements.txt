@@ -1,0 +1,65 @@
+# AI Desktop Agent — 后端核心依赖
+
+# Web 框架
+fastapi>=0.111,<1.0
+uvicorn[standard]>=0.30,<1.0
+
+# 数据
+python-dotenv>=1.0,<2.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.0,<3.0
+
+# HTTP 客户端
+httpx>=0.27,<1.0
+openai>=1.58.0
+
+# 商品搜索（支付/选品链路 L1 真实商品来源；失败时本地 catalog 兜底）
+channel3-sdk>=4.5.0,<5.0.0
+
+# 本地快脑(Ollama 小模型 logprob 决策)
+ollama>=0.4
+
+# Agent 图引擎（支付代理 StateGraph 运行时；缺失会让 CI 收集阶段
+# import 失败 → pytest exit code 2）
+langgraph>=1.0,<2.0
+
+# 工具
+python-multipart>=0.0.9,<1.0
+python-docx>=1.1,<2.0
+
+# 本地 Whisper STT（Faster-Whisper 本地语音识别）
+faster-whisper>=1.0,<2.0
+soundfile>=0.12,<1.0
+
+# 截图
+mss>=9.0,<10.0
+
+# OCR（可选，PaddleOCR优先，Tesseract降级）
+# paddleocr>=2.8  # 取消注释启用PaddleOCR
+# pytesseract>=0.3.10  # 取消注释启用Tesseract
+# Pillow>=10.0  # OCR依赖
+
+# RAG向量检索
+sentence-transformers>=2.6,<3.0
+rank-bm25>=0.2.0
+faiss-cpu>=1.7.4
+numpy>=1.26.0
+
+# 可观测性
+# prometheus_client>=0.20  # 生产环境启用
+# opentelemetry-sdk>=1.25  # OTel tracing已内置
+# langfuse>=2.0  # Langfuse已内置
+
+# RAG评测（可选）
+# ragas>=0.1  # 取消注释启用RAGAS评测
+# datasets>=2.18  # RAGAS依赖
+
+# VLM 本地视觉语言模型（可选，取消注释启用）
+# torch>=2.1  # PyTorch
+# transformers>=4.49.0  # Qwen2.5-VL
+# qwen-vl-utils>=0.0.8  # Qwen VL 图片预处理
+# accelerate>=0.27  # 模型加载加速
+# Pillow>=10.0  # 图片处理
+
+# 注意：PostgreSQL 驱动已移除，项目使用 SQLite（内置）
+# 如需 PostgreSQL：pip install psycopg2-binary>=2.9.9
