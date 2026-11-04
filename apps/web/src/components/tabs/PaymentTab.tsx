@@ -184,7 +184,7 @@ export function PaymentTab(props: Props) {
       {/* 储蓄目标（P1 演示入口）：先立目标，后买享受型消费会被拦截审批 */}
       <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #34D39944', background: '#081811' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: '#60A5FA', flexShrink: 0 }}>👥 成员约束</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#60A5FA', flexShrink: 0 }}>🎯 储蓄目标</span>
           <input
             value={goalText}
             onChange={e => setGoalText(e.target.value)}
