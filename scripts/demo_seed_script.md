@@ -1,4 +1,4 @@
-# ECV 后端封版演示种子脚本（USD 数字版，2026-11-04 行为实测）
+# ECV 后端封版演示种子脚本（USD 数字版，2026-11-04 行为实测；K3 修订：5 步主线 + 12 事件口径）
 
 数字唯一来源：`scripts/calc_demo_numbers.py`。该脚本直接调用前端 `/api/v1/plans` 所用的
 `generate_dual_plans(intent_query="ECV 社团采购", max_items=8, use_channel3=False)`，
@@ -20,7 +20,7 @@
 - 每句话术标注预期系统反应：前端出现什么、总价变成多少、审计新增哪条事件。
 
 ================================================================================
-## 6 步主线话术
+## 5 步主线话术
 
 1. "帮我选 8 件商品，总价控制在 600 美元以内"
    → 前端：生成双方案 Tab。A 低价优先 8 件 $26.0；B 耐用优先 8 件 $393.0。审计新增：`plan_generated`
@@ -31,23 +31,63 @@
        玻璃水瓶 750ml 42.0 / 木质相框 8x10 38.0 / 铝制奖牌 35.0 / 亚麻收纳袋 35.0）
      审计：`select_plan` 仅入车，不单独写事件
 
-3. "预算压到 350"（兜底分支触发）
+3. "预算压到 350"（新增约束，兜底触发）
    → 前端：新增预算约束 350；点"确认支付"时被 D2 主门拦截，返回
      HTTP 400 `budget_violated`：cart_total 393.0 / budget_limit 350.0 / overage 43.0，
      文案"🚨 预算守卫拦截支付：超支 43.00，已超过预算上限 350.00。"
-     审计新增：`constraint_changed` + `budget_violated` + `fallback_triggered`
+   → 审计注意（2026-11-04 探针实测修正）：第 1 次点"确认支付"就把
+     `review_confirmed`(final_total=393.0) + `order_status_changed(draft→confirmed)`
+     写进账本——复核在先、预算门在后。本步完整新增为：`conflict_detected`（600 与 350 并存，
+     比例 1.7x）→ `constraint_changed` → `review_confirmed` → `draft→confirmed`
+     → `budget_violated` → `fallback_triggered`。
+     完整 12 事件权威表见 `docs/EXECUTION_CHECKLIST.md`「K3 权威事件序列」——
+     **本文件不复写，两处维护必然漂移**（原按事件条数对齐的口径即由此作废）。
 
 4. "删掉木质相框、铝制奖牌、亚麻收纳袋"
    → 前端：购物车 8 件 → 5 件；删减 38.0 + 35.0 + 35.0 = 108.0，
-     总价 393.0 − 108.0 = 285.0（≤ 350）。审计新增：`cart_modified`
+     总价 393.0 − 108.0 = 285.0（≤ 350）。审计新增：`cart_modified`(batch_update ids=3)
+   → **不再恢复预算**：285.0 已在 350 内。原第 5 步"预算回到 600"已删除——POST 只增改不了值，
+     "抬预算过门"是叙事负债（评委看到的是为过门放宽上限），门是通过减支过的，不是放宽过的。
 
-5. "恢复预算到 600"
-   → 前端：预算 350 → 600；285.0 ≤ 600，预算守卫通过。审计新增：`constraint_changed`
-
-6. "支付确认"（触发 PayPal）
+5. "支付确认"（触发 PayPal）
    → 前端：弹出 PayPal Sandbox 窗口；按钮下方小字"人工确认后方可发起支付"。
-     审计新增：`review_confirmed` + `order_status_changed(confirmed→paying)`；
-     浏览器批准回调后：`payment_completed` + `order_status_changed(paying→paid)`
+   → 审计：`order_status_changed(confirmed→paying)`（`review_confirmed` 已在第 3 步落账，
+     此处不重复写）→ 浏览器批准回调后：`payment_completed`(285.0)
+     + `order_status_changed(paying→paid)`
+
+================================================================================
+## 取消分支（独立镜头，必须全新 session）
+
+- **硬性要求：全新 session**（不要复用 paid 后的那个）。同 session paid 后再
+  `create_order` 会返回 **409「订单已支付，禁止重复创建支付订单」**——这是预期的治理行为
+  （防重复扣款），不是故障；镜头里若真出现，口播一句"同一会话不允许对已支付订单重复发起支付"
+  即可，别慌。
+- 步骤：新 session → 加预算 600 → 生成方案（A/B 数字同主线）→ 选方案 A/B → 支付
+  → PayPal 页面点 **Cancel** → 落地页 `status=cancelled` → 订单状态 `cancelled`。
+- 审计（同单）：`review_confirmed` → `draft→confirmed` → `confirmed→paying` → `paying→cancelled`。
+- 取消后重建单（同 session 允许，CANCELLED 不再被复用）会**重新走一遍复核**——账本出现
+  **第二次 `review_confirmed`**。这是好镜头：治理随订单重启，不留默认信任。
+- 一屏双终态：该 session 里最终两笔订单（`cancelled` + `paid`）并列在 OrdersTab，对比干净。
+
+================================================================================
+## Talking points（现场可背）
+
+1. **393 复核叙事**："复核记录发生在 393 那一刻——用户确认了 393，预算门立刻把这笔超预算的
+   支付拦下来；之后在同一笔订单上改单到 285，服务端在支付前重新从购物车算价，PayPal 页面
+   显示的就是 285。人看到多少、付多少、账本记多少，三者一致，这就是 HITL。"
+2. **多预算取 min**："多条预算约束并存时，生效上限取最严格的一条——约束只会越收越紧，
+   不会因为叠加而松动。"（`conflict_detected` 事件 + 看板冲突红框就是画面证据；实测
+   600 vs 350 比例 1.7x 触发。）
+3. **approval URL 透传**（K5 同步用）："the approval URL is relayed verbatim from the PayPal
+   Orders API response; neither the agent nor the front end ever composes or rewrites it."
+
+================================================================================
+## 可选尾镜头（paid 之后拍，关键路径已封顶）
+
+回约束看板删掉冗余的 600 预算卡 → 冲突红框**实时消除**（实测：600 vs 350 = 1.7x 冲突；
+删除 600 后 `GET /constraints` 的 conflicts 归 0），审计新增 `constraint_changed`(removed)。
+收尾口径："约束有增有删，账本全记"。不进也不阻塞主线——A5 删除能力已有探针与审计覆盖。
+
 
 ================================================================================
 ## 兜底分支数值（实测）

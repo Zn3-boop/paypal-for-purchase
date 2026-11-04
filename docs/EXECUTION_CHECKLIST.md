@@ -80,9 +80,41 @@
 ### K. 演示工程
 - [x] ✅ **K1 Mock 商品池** — `shopper/data/k1_catalog.json`：45 件（装饰 14 / 奖品 12 / 饮用水 11 / 文具 8），环保款 22，价格 1.5~95，含环保/普通对照
 - [x] ✅ **K2 降级实测** — `planner._retrieve_catalog()`：Channel3 异常 try/except → 自动切 K1（use_channel3 可控）
-- [x] ✅ **K3 完整 6 步 + 兜底分支复跑** — `golden_path_verify.py`（fake 网关）：正常路径 8 事件严格匹配（constraint→plan→cart→review→draft→confirmed→paying→payment_completed→paid）、异常路径金额篡改触发 `payment_amount_mismatch` + cancelled，快照存档 `docs/golden_path_timeline_<stamp>.json`（utf-8 直写，2026-11-04 重生成）；数字统一由 `scripts/calc_demo_numbers.py` 输出并自断言：方案 A 8 件 $26.0 / 方案 B 8 件 $393.0（预算 600），兜底触发预算 $350（B 购物车 393.0 超支 43.0，D2 主门 400 `budget_violated`），删 3 件省 $108.0 → $285.0；预算 1.0 无解（`budget_too_low` + 2 条二选一建议）；Channel3 断网异常自动降级 K1 45 件（2026-11-04 复核）
+- [x] ✅ **K3 完整 5 步 + 兜底分支复跑** — `golden_path_verify.py`（fake 网关）：其自身最短路径基线 8 事件严格匹配（constraint→plan→cart→review→draft→confirmed→paying→payment_completed→paid）、异常路径金额篡改触发 `payment_amount_mismatch` + cancelled，快照存档 `docs/golden_path_timeline_<stamp>.json`（utf-8 直写，2026-11-04 重生成）；数字统一由 `scripts/calc_demo_numbers.py` 输出并自断言：方案 A 8 件 $26.0 / 方案 B 8 件 $393.0（预算 600），兜底触发预算 $350（B 购物车 393.0 超支 43.0，D2 主门 400 `budget_violated`），删 3 件省 $108.0 → $285.0；预算 1.0 无解（`budget_too_low` + 2 条二选一建议）；Channel3 断网异常自动降级 K1 45 件（2026-11-04 复核）
 - [ ] 🔴 **K4 录屏 + 备份视频** — 未做
 - [x] ✅ **K5 Devpost 文案** — `docs/DEVPOST_SUBMISSION.md`：问题/方案、五条技术亮点、3 分钟演示路径、验证证据与诚实限制（2026-11-03）
+### K3 权威事件序列（2026-11-04 探针实测，唯一口径）
+
+> 结论：golden 最短路径的 8 事件**不是**完整 K3 主线的子序列——K3 里"删 3 件"发生在预算门
+> 400 之后，`cart_modified` 必然晚于 `review_confirmed`（复核在预算门之前落账）。因此验收
+> **不用事件条数对齐**，只用下面三条口径。`scripts/demo_seed_script.md` 引用本表，不复写。
+
+1. **类型覆盖**：`MISSING = []`（8 种基线事件类型一个不缺）。
+2. **生命周期严格有序**：`review_confirmed` < `order_status_changed(draft→confirmed)` <
+   `order_status_changed(confirmed→paying)` < `payment_completed` < `order_status_changed(paying→paid)`。
+3. **额外事件与操作一一对应**：`conflict_detected`（350 新增时与 600 并存，比例 1.7x）/
+   `budget_violated` + `fallback_triggered`（D2 门 400，overage 43.0）/ `cart_modified`（删 3 件）。
+
+主线 5 步完整序列（12 事件）：
+
+| # | 事件 | 关键数据 |
+|---|---|---|
+| 1 | `constraint_changed` | added 600 |
+| 2 | `plan_generated` | A $26.0 / 8 件，B $393.0 / 8 件 |
+| 3 | `conflict_detected` | 600 vs 350（比例 1.7x） |
+| 4 | `constraint_changed` | added 350 |
+| 5 | `review_confirmed` | final_total **393.0**，plan_id B（第 1 次点"确认支付"落账） |
+| 6 | `order_status_changed` | draft→confirmed |
+| 7 | `budget_violated` | limit 350.0 / actual 393.0 / resolution 超支 43.00 |
+| 8 | `fallback_triggered` | reason=支付前预算守卫拦截 393.00 > 350.00 |
+| 9 | `cart_modified` | batch_update ids=3，393.0→285.0 |
+| 10 | `order_status_changed` | confirmed→paying |
+| 11 | `payment_completed` | final_total **285.0** |
+| 12 | `order_status_changed` | paying→paid |
+
+取消分支（**必须全新 session**）：`paying→cancelled` 转移 + 取消后重建单的**第二次**
+`review_confirmed`（该 session 共 11 事件，OrdersTab 一屏 cancelled + paid 双终态）。
+同 session paid 后再 `create_order` → HTTP 409「订单已支付，禁止重复创建支付订单」（预期治理行为）。
 
 ## 三、剩余工作清单（按缺口聚合）
 
@@ -103,7 +135,8 @@
 | 4 | ~~H4 自然语言查单~~ | ✅ 已完成（`/orders/query` 只读 + 归属强制 + 前端快捷句） |
 
 ### Demo 收尾
-- ~~K3 完整流程复跑（6 步 + 预算 350 兜底 + 断网降级）~~ ✅ 2026-11-04
+- ~~K3 完整流程复跑（旧 6 步话术 + 预算 350 兜底 + 断网降级）~~ ✅ 2026-11-04（口径已修订，见下行）
+- K3 主线按**修订口径**复跑：5 步主线 + 12 事件三条验收（`scripts/demo_seed_script.md` 已同步）+ 新 session 取消分支
 - K4 录屏（含备份视频）
 - ~~K5 Devpost 文案（定位段 + 技术亮点五条）~~ ✅ `docs/DEVPOST_SUBMISSION.md`
 
@@ -123,6 +156,7 @@
 | 未点确认前 AI 无法发起支付 | ✅ | HITL 闸门 + create_order 金额强校验 |
 | 支付后订单状态可自然语言查询 | ✅ | H4 `/orders/query`（服务端注入 session + 归属强制） |
 | 审计日志完整记录一轮全部动作 | ✅ | I2/I3 + 9 事件埋点（含 order_status_changed） |
+| K3 主线审计口径（5 步 / 12 事件） | ✅ 2026-11-04 探针 | 三条：类型覆盖 `MISSING=[]`／生命周期严格有序（review→draft→confirmed→paying→payment_completed→paid）／额外事件与操作一一对应。权威表见「K3 权威事件序列」；**不用事件条数对齐** |
 | 断网/超时 → Mock 降级成功 | ✅ | Channel3 异常实测切 K1 45 件（2026-11-03 探针） |
 | 启动 import-smoke（`import app.main` 失败即红灯） | ✅ | 每次提交前跑 `cd apps/server; python -c "import app.main"`（2026-11-04 加入，防 provider.py 型"启动即毁"） |
 
