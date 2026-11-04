@@ -592,7 +592,16 @@ async def paypal_create_node(state: dict[str, Any]) -> dict[str, Any]:
                 },
             )
             intent, _ = svc.authorize_payment(intent.id)
-            intent, msg = await svc.create_payment_order(intent.id)
+            # 回跳落地页必须是前端页面，不能是 example.com 死链：
+            # 该链路真正的 capture 由图内 paypal_capture_node 完成，因此回跳
+            # 指向复核页而不是 callback 端点，避免同一订单被二次 capture。
+            frontend = (_get_settings().frontend_base_url or "").rstrip("/")
+            session_id = state.get("session_id", "") or ""
+            intent, msg = await svc.create_payment_order(
+                intent.id,
+                return_url=f"{frontend}/payment/review?session_id={session_id}&status=returned",
+                cancel_url=f"{frontend}/payment/review?session_id={session_id}&status=cancelled",
+            )
             # P2-10 修复（双字段隔离）：
             #   - shopping_intent_id 保持业务 intent 稳定 id（选品阶段，全程不变，
             #     供证据面板/留痕/重试恢复反查使用）；

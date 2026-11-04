@@ -1,0 +1,447 @@
+"""订单生命周期状态机（H1 模块）+ 订单档案库（H2/H3 数据底座）。
+
+    draft ──▶ confirmed ──▶ paying ──▶ paid
+                  │            │
+                  └──▶ cancelled ◀──┘
+
+转移守卫（Guard，违反则结构上无法转移）：
+  - draft → confirmed  ：审计链必须存在匹配该订单的 review_confirmed 事件
+                         （HITL 从「前端按钮顺序」升级为「后端强制」——
+                          没有 review 记录，进不了 paying）
+  - confirmed → paying ：check_budget(session_total) PASS
+                         （D2 主门以状态机转移守卫的形态落地）
+  - paying → paid      ：capture 成功 且 captured_amount == 订单金额
+                         （D2 副门：金额一致性纵深防御）
+  - paying → cancelled ：用户取消 / PayPal 回调 cancelled / 金额不符告警
+
+关键设计：
+  - 幂等：目标状态 == 当前状态时返回成功但不重复记审计，PayPal 回调重试安全。
+  - 每次成功转移写第 9 个审计事件 order_status_changed（from/to/order_id/reason）。
+  - 业务订单号（ord_xxx）贯穿全生命周期；paypal_token 仅是网关侧令牌。
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import uuid
+from decimal import Decimal, ROUND_HALF_UP
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Callable
+
+from app.services.group_purchase.audit_log import (
+    get_audit_logger,
+    log_order_status_changed,  # 第 9 个审计埋点
+)
+from app.services.group_purchase.session_state import get_session, update_session
+
+logger = logging.getLogger(__name__)
+
+
+class OrderStatus(str, Enum):
+    """订单状态枚举（H1 状态机节点）。"""
+
+    DRAFT = "draft"            # 已创建订单记录，等待人工复核
+    CONFIRMED = "confirmed"    # 人工复核通过（review_confirmed 事件已落审计）
+    PAYING = "paying"          # 已向 PayPal 发起支付，等待回跳
+    PAID = "paid"              # 支付完成（终态）
+    CANCELLED = "cancelled"    # 已取消 / 金额不符告警（终态）
+
+
+# 合法转移表：key = 当前状态，value = 允许到达的状态集合
+_ALLOWED_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
+    OrderStatus.DRAFT: {OrderStatus.CONFIRMED, OrderStatus.CANCELLED},
+    OrderStatus.CONFIRMED: {OrderStatus.PAYING, OrderStatus.CANCELLED},
+    OrderStatus.PAYING: {OrderStatus.PAID, OrderStatus.CANCELLED},
+    OrderStatus.PAID: set(),
+    OrderStatus.CANCELLED: set(),
+}
+
+
+@dataclass
+class OrderRecord:
+    """业务订单记录：order_id 为本地业务订单号，贯穿 draft → paid 全程。
+
+    items 为创建时的购物车快照（list[dict]），与审计 plan_snapshot 同构。
+    """
+
+    order_id: str
+    session_id: str
+    user_id: str
+    total: float = 0.0
+    currency: str = "USD"
+    plan_id: str | None = None
+    paypal_token: str | None = None
+    items: list[dict[str, Any]] = field(default_factory=list)
+    status: OrderStatus = OrderStatus.DRAFT
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    cancelled_reason: str | None = None
+    transitions: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "order_id": self.order_id,
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "total": self.total,
+            "currency": self.currency,
+            "plan_id": self.plan_id,
+            "paypal_token": self.paypal_token,
+            "items_count": len(self.items),
+            "items": self.items,
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "cancelled_reason": self.cancelled_reason,
+            "transitions": self.transitions,
+        }
+
+    def brief(self) -> dict[str, Any]:
+        """轻量视图（列表页 / 轮询用，不含商品明细）。"""
+        return {
+            "order_id": self.order_id,
+            "session_id": self.session_id,
+            "status": self.status.value,
+            "total": self.total,
+            "currency": self.currency,
+            "plan_id": self.plan_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "cancelled_reason": self.cancelled_reason,
+        }
+
+
+# ============================================================
+# 进程内订单注册表（内存演示级，与 session_state 同模式）
+# ============================================================
+
+_orders: dict[str, OrderRecord] = {}
+_orders_lock = threading.Lock()
+
+
+def _new_order_id() -> str:
+    return f"ord_{uuid.uuid4().hex[:8]}"
+
+
+def get_order_record(order_id: str) -> OrderRecord | None:
+    with _orders_lock:
+        return _orders.get(order_id)
+
+
+def list_order_records(session_id: str | None = None) -> list[OrderRecord]:
+    with _orders_lock:
+        records = list(_orders.values())
+    if session_id:
+        records = [r for r in records if r.session_id == session_id]
+    records.sort(key=lambda r: r.created_at, reverse=True)
+    return records
+
+
+def _save(order: OrderRecord) -> None:
+    """持久化订单记录（内存注册表；若后续引入 JSONL 可在此扩展）。"""
+    order.updated_at = datetime.now(timezone.utc).isoformat()
+    with _orders_lock:
+        _orders[order.order_id] = order
+# ============================================================
+# 转移守卫（Guard）
+# ============================================================
+
+
+def guard_review_confirmed(order: OrderRecord) -> tuple[bool, str]:
+    """draft → confirmed 守卫：审计链必须有匹配该订单的 review_confirmed 事件。
+
+    即使有人绕过前端直接调用支付 API，没有 review 记录也进不了 paying。
+    """
+    try:
+        logs = get_audit_logger().get_session_timeline(order.session_id)
+        for entry in logs:
+            if entry.event == "review_confirmed" and entry.data.get("order_id") == order.order_id:
+                return True, "review_confirmed 审计事件存在"
+    except Exception as exc:  # 审计查询失败按 fail-closed 处理
+        logger.warning("guard_review_confirmed query failed: %s", exc)
+    return (
+        False,
+        f"拒绝转移:未找到匹配该订单({order.order_id})的 review_confirmed 审计事件,"
+        "请先在复核面板完成人工确认",
+    )
+
+
+def guard_budget_passed(budget_check: dict[str, Any] | None) -> tuple[bool, str]:
+    """confirmed → paying 守卫：带 check_budget 结果时校验 PASS。
+
+    budget_check 为 None 表示会话未设置硬预算，跳过（无上限则无从超支）。
+    """
+    if budget_check is None:
+        return True, "会话未设置硬预算，跳过预算守卫"
+    if not budget_check.get("ok", False):
+        return (
+            False,
+            f"预算守卫未通过:{budget_check.get('resolution', '超支')}"
+            "（未创建 PayPal 订单，请调整购物车或提高预算）",
+        )
+    return True, "预算检查通过"
+
+
+def _amount_to_cents(value: Any) -> int:
+    """将金额转为分整数，避免 float 比较和容差放行问题。"""
+    amount = Decimal(str(value))
+    return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+# ============================================================
+# 启动对账：扫 payment_completed 有但订单仍 paying → 补偿转移到 paid
+# ============================================================
+
+def reconcile_sessions_on_startup() -> int:
+    """对账进程内订单：发现审计链有 payment_completed 但订单仍 paying 的，补偿转移到 paid。
+
+    这是对 D2 副门崩溃窗口的显式补偿（见 paypal_callback.py 注释“细节 3”）。
+    返回补偿次数，便于日志观察。
+    """
+    from app.services.group_purchase.audit_log import get_audit_logger, log_order_status_changed
+
+    comp_count = 0
+    pending = [o for o in list_order_records()]  # 无 session_id 过滤，遍历全库
+    for order in pending:
+        if order.status != OrderStatus.PAYING:
+            continue
+        # 查该 session 审计链是否存在 payment_completed 且 order_id 匹配
+        try:
+            logs = get_audit_logger().get_session_timeline(order.session_id)
+            found = any(
+                e.event == "payment_completed" and e.data.get("order_id") == order.order_id
+                for e in logs
+            )
+        except Exception:  # pragma: no cover
+            found = False
+        if not found:
+            continue
+        # 补偿：直接转移 paid（不再走 guard_amount_matched，因为审计事实已落盘）
+        order.status = OrderStatus.PAID
+        order.updated_at = datetime.now(timezone.utc).isoformat()
+        order.transitions.append({
+            "from": OrderStatus.PAYING.value,
+            "to": OrderStatus.PAID.value,
+            "at": order.updated_at,
+            "actor": "startup_reconcile",
+            "reason": "对账补偿：审计已有 payment_completed，订单仍 paying，强制迁至 paid",
+        })
+        _save(order)
+        # 写一次补录审计（幂等：同一订单同一 session 只补一次）
+        try:
+            log_order_status_changed(
+                session_id=order.session_id,
+                user_id=order.user_id,
+                actor="startup_reconcile",
+                order_id=order.order_id,
+                from_status=OrderStatus.PAYING.value,
+                to_status=OrderStatus.PAID.value,
+                reason="对账补偿：审计已有 payment_completed，订单仍 paying，强制迁至 paid",
+            )
+        except Exception:  # pragma: no cover
+            logger.warning("reconcile write order_status_changed failed for %s", order.order_id)
+        comp_count += 1
+    return comp_count
+
+
+
+def guard_amount_matched(
+    captured_amount: float,
+    expected_total: float,
+) -> tuple[bool, str]:
+    """paying → paid 守卫：PayPal 实扣金额必须与订单金额严格一致（D2 副门）。
+
+    PayPal 返回的金额通常是字符串；比较前统一转换为“分”整数。
+    因此 26.00 与 26.01 会被严格区分，不依赖 float 容差。
+    """
+    captured_cents = _amount_to_cents(captured_amount)
+    expected_cents = _amount_to_cents(expected_total)
+    if captured_cents != expected_cents:
+        return (
+            False,
+            f"金额不一致告警:PayPal 实扣 {captured_cents / 100:.2f},订单金额 {expected_cents / 100:.2f},"
+            "已阻止进入 paid 并回退 cancelled",
+        )
+    return True, f"实扣金额与订单金额一致（{captured_cents / 100:.2f}）"
+
+
+# ============================================================
+# 状态转移核心
+# ============================================================
+
+
+def transition_order(
+    order: OrderRecord,
+    target: OrderStatus,
+    *,
+    actor: str,
+    reason: str | None = None,
+    guard: Callable[[], tuple[bool, str]] | None = None,
+) -> tuple[bool, str]:
+    """执行一次状态转移。
+
+    返回 (ok, message)：
+      - 幂等：target == 当前状态 → (True, "幂等跳过")，不重复记审计
+      - 非法：不在迁移表     → (False, 错误信息)，状态不变
+      - 守卫失败             → (False, 错误信息)，状态不变
+      - 成功               → (True, 转移描述)，记 order_status_changed 审计
+    """
+    if order.status == target:
+        return True, f"订单已是 {target.value}，幂等跳过（不重复记账）"
+
+    if target not in _ALLOWED_TRANSITIONS.get(order.status, set()):
+        return False, f"非法转移:{order.status.value} → {target.value}"
+
+    if guard is not None:
+        ok, msg = guard()
+        if not ok:
+            return False, msg
+
+    prev = order.status
+    order.status = target
+    order.cancelled_reason = reason if target == OrderStatus.CANCELLED else None
+    order.transitions.append(
+        {
+            "from": prev.value,
+            "to": target.value,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "actor": actor,
+            "reason": reason,
+        }
+    )
+    _save(order)
+
+    # 同步会话侧的 order_id / order_status（旧字段兼容）
+    try:
+        session = get_session(order.session_id)
+        if session is not None:
+            session.order_id = order.order_id
+            session.order_status = order.status.value
+            update_session(session)
+    except Exception as exc:  # pragma: no cover - 不应阻断转移
+        logger.warning("session order_status sync failed: %s", exc)
+
+    # 第 9 个审计事件:order_status_changed
+    try:
+        log_order_status_changed(
+            session_id=order.session_id,
+            user_id=order.user_id,
+            actor=actor,
+            order_id=order.order_id,
+            from_status=prev.value,
+            to_status=target.value,
+            reason=reason,
+        )
+    except Exception as exc:  # pragma: no cover - 审计失败不阻断主链路
+        logger.warning("audit order_status_changed failed: %s", exc)
+
+    return True, f"订单状态:{prev.value} → {target.value}"
+
+
+# ============================================================
+# 领域转移封装
+# ============================================================
+
+
+def create_order_record(
+    session_id: str,
+    user_id: str,
+    *,
+    total: float,
+    items: list[dict[str, Any]],
+    plan_id: str | None = None,
+    currency: str = "USD",
+) -> OrderRecord:
+    """创建订单记录（初始状态 draft）。"""
+    order = OrderRecord(
+        order_id=_new_order_id(),
+        session_id=session_id,
+        user_id=user_id,
+        total=round(float(total), 2),
+        currency=currency,
+        plan_id=plan_id,
+        items=items,
+        status=OrderStatus.DRAFT,
+    )
+    _save(order)
+    return order
+
+
+def confirm_order(order: OrderRecord, actor: str = "user") -> tuple[bool, str]:
+    """draft → confirmed。守卫：存在匹配该订单的 review_confirmed 事件。"""
+    return transition_order(
+        order,
+        OrderStatus.CONFIRMED,
+        actor=actor,
+        reason="人工复核通过",
+        guard=lambda: guard_review_confirmed(order),
+    )
+
+
+def begin_payment(
+    order: OrderRecord,
+    actor: str = "system",
+    *,
+    budget_check: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """confirmed → paying。守卫：check_budget PASS（D2 主门）。"""
+    return transition_order(
+        order,
+        OrderStatus.PAYING,
+        actor=actor,
+        reason="发起 PayPal 支付",
+        guard=lambda: guard_budget_passed(budget_check),
+    )
+
+
+def complete_payment(
+    order: OrderRecord,
+    captured_amount: float,
+    actor: str = "paypal_callback",
+    *,
+    expected_total: float | None = None,
+) -> tuple[bool, str]:
+    """paying → paid。守卫：captured_amount == 订单金额（D2 副门）。"""
+    expected = expected_total if expected_total is not None else order.total
+    return transition_order(
+        order,
+        OrderStatus.PAID,
+        actor=actor,
+        reason=f"PayPal capture 成功，金额 {float(captured_amount):.2f}",
+        guard=lambda: guard_amount_matched(captured_amount, expected),
+    )
+
+
+def cancel_order(
+    order: OrderRecord,
+    actor: str = "user",
+    *,
+    reason: str = "用户取消",
+) -> tuple[bool, str]:
+    """draft / confirmed / paying → cancelled（paid 之后不可取消）。"""
+    return transition_order(
+        order,
+        OrderStatus.CANCELLED,
+        actor=actor,
+        reason=reason,
+    )
+
+
+def attach_paypal_token(order: OrderRecord, token: str) -> None:
+    """绑定网关侧 PayPal 令牌（进入 paying 后写入）。"""
+    order.paypal_token = token
+    _save(order)
+
+
+def refresh_order_snapshot(
+    order: OrderRecord,
+    *,
+    total: float,
+    items: list[dict[str, Any]],
+) -> None:
+    """订单进入 paying 前，以当前购物车刷新金额与快照（draft/confirmed 阶段允许）。"""
+    order.total = round(float(total), 2)
+    order.items = items
+    _save(order)

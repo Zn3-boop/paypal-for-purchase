@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     paypal_sandbox_secret: str = ""
     paypal_sandbox_api: str = "https://api-m.sandbox.paypal.com"
     paypal_rest_api: str = ""  # 生产环境; 为空时由 mode 推导
+    paypal_return_url: str = "http://localhost:8000/api/v1/paypal/callback"
+    paypal_cancel_url: str = "http://localhost:8000/api/v1/paypal/cancel"
+
+    # ---------- 前端地址（PayPal 回跳后浏览器落地页）----------
+    # 必须与 apps/web 的 dev 端口一致（package.json: vite --port 3000）。
+    frontend_base_url: str = "http://localhost:3000"
 
     # ---------- Payment agent（授权边界支付子图）----------
     payment_mode: str = "mock"  # mock = 假订单全链路；real = 真实 PayPal sandbox 订单

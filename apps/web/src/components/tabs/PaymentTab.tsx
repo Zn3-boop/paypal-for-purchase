@@ -167,6 +167,10 @@ export function PaymentTab(props: Props) {
     <section>
       {/* 契约 11.7：sandbox 测试账号常驻提示条（评委打开 demo 的第一眼） */}
       <SandboxNotice />
+      {/* 契约 K5：常驻徽章，告知评委当前 PayPal 链路为沙箱环境 */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', borderRadius: 6, padding: '2px 8px', background: '#1f2937', color: '#fbbf24', border: '1px solid #fbbf24' }}>PayPal Sandbox</span>
+      </div>
 
       {/* Intro card */}
       <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #FF6B3544', background: '#1a1008' }}>
@@ -180,7 +184,7 @@ export function PaymentTab(props: Props) {
       {/* 储蓄目标（P1 演示入口）：先立目标，后买享受型消费会被拦截审批 */}
       <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #34D39944', background: '#081811' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: '#34D399', flexShrink: 0 }}>🎯 储蓄目标</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#60A5FA', flexShrink: 0 }}>👥 成员约束</span>
           <input
             value={goalText}
             onChange={e => setGoalText(e.target.value)}
@@ -198,7 +202,7 @@ export function PaymentTab(props: Props) {
               </div>
             ))}
             <div style={{ marginTop: 4, opacity: 0.75 }}>
-              💡 现在试着说「帮我找一副 300 以内的降噪耳机」——AI 会搜真实商品并让你确认后再付款。
+              💡 试试输入想买的需求，代理会为你创建订单并等待批准
             </div>
           </div>
         )}
@@ -208,7 +212,7 @@ export function PaymentTab(props: Props) {
       <div style={{ ...sx.card, marginBottom: 16 }}>
         {history.length === 0 && (
           <div style={{ fontSize: 12, color: '#6B7280', padding: 12 }}>
-            试着输入：<b>帮我找一副 300 以内的降噪耳机</b>
+            试着输入：<b>帮我买一张周五晚上听的爵士唱片</b>
           </div>
         )}
         {history.map(m => {
@@ -277,7 +281,7 @@ export function PaymentTab(props: Props) {
 
       {/* Input */}
       <div style={{ display: 'flex', gap: 8 }}>
-        <input value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && !loading && doChat()} placeholder="帮我找一副 300 以内的降噪耳机，或试试英文 noise cancelling headphones…" style={{ ...sx.input, flex: 1 }} />
+        <input value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && !loading && doChat()} placeholder="例如：帮我买一张周五晚上听的爵士唱片" style={{ ...sx.input, flex: 1 }} />
         {micSupported && (
           <button onClick={toggleMic} disabled={micTranscribing} title={micTranscribing ? 'Transcribing…' : (micListening ? 'Stop and transcribe' : 'Speak to the payment agent')} style={{ width: 44, border: 'none', borderRadius: 10, cursor: micTranscribing ? 'default' : 'pointer', fontSize: 18, background: micListening ? '#3B82F6' : '#1F2937', color: micListening ? '#fff' : '#E5E7EB', opacity: micTranscribing ? 0.6 : 1, flexShrink: 0 }}>
             {micTranscribing ? '…' : micListening ? '⏹' : '🎤'}

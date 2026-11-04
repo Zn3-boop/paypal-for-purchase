@@ -24,8 +24,11 @@ if hasattr(sys.stderr, 'reconfigure') and (sys.stderr.encoding or '').lower() !=
 # Desktop routers (automation / voice / desktop / provider / browser / agent …)
 # are intentionally not imported; their files no longer expose routes.
 from app.api import health, payment, stt, tools
+from app.api import paypal_callback
+from app.api import plans, cart, constraints, orders
 from app.utils.response_cleaner import clean_fastapi_response_body
-
+from app.api import session as session_api
+from app.api import audit as audit_api
 
 # ========== Lifespan replaces the deprecated on_event("startup") ==========
 @asynccontextmanager
@@ -35,6 +38,13 @@ async def lifespan(app: FastAPI):
         print("RAG store available")
     except Exception as e:
         print(f"Warning: RAG store init skipped: {e}")
+    try:
+        from app.services.group_purchase.order_lifecycle import reconcile_sessions_on_startup
+        count = reconcile_sessions_on_startup()
+        if count:
+            print(f"[on-reconcile] Compensated {count} hanging paying->paid orders")
+    except Exception as exc:
+        print(f"[on-reconcile] Skipped: {exc}")
     yield
 
 
@@ -50,6 +60,16 @@ app = FastAPI(
 from app.core.config import get_settings
 
 _settings = get_settings(cache=True)
+# Startup mode disclosure (K3/K4 evidence: confirm actual runtime mode before demo)
+from app.services.llm.effective_mode import probe_llm_mode
+
+_mode_lines = [
+    f"[mode] llm={probe_llm_mode()}",
+    f"[mode] payment={_settings.payment_mode}",
+    f"[mode] paypal={_settings.paypal_mode}",
+    f"[mode] channel3={'real' if _settings.channel3_api_key else 'fallback(k1_catalog)'}",
+]
+print(" | ".join(_mode_lines))
 _allowed_origins = [o.strip() for o in _settings.cors_origins.split(",") if o.strip()]
 
 app.add_middleware(
@@ -130,6 +150,13 @@ app.include_router(health.router)
 app.include_router(stt.router, prefix=API_V1_PREFIX)
 app.include_router(tools.router, prefix=API_V1_PREFIX)
 app.include_router(payment.router, prefix=API_V1_PREFIX)
+app.include_router(paypal_callback.router, prefix=API_V1_PREFIX)
+app.include_router(plans.router, prefix=API_V1_PREFIX)
+app.include_router(cart.router, prefix=API_V1_PREFIX)
+app.include_router(constraints.router, prefix=API_V1_PREFIX)
+app.include_router(session_api.router, prefix=API_V1_PREFIX)
+app.include_router(audit_api.router, prefix=API_V1_PREFIX)
+app.include_router(orders.router, prefix=API_V1_PREFIX)
 
 
 # ========== Static SPA hosting (apps/web built into apps/server/static) ==========

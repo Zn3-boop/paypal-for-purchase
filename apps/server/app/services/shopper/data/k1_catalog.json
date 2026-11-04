@@ -1,0 +1,326 @@
+{
+  "catalog": [
+    {
+      "id": "k1_001",
+      "name": "不锈钢保温瓶 500ml",
+      "category": "饮用水",
+      "price": 28.0,
+      "material": "不锈钢",
+      "eco_label": true,
+      "durability": 5,
+      "note": "耐用"
+    },
+    {
+      "id": "k1_002",
+      "name": "一次性塑料水瓶 500ml",
+      "category": "饮用水",
+      "price": 2.5,
+      "material": "塑料",
+      "eco_label": false,
+      "durability": 1,
+      "note": "禁用"
+    },
+    {
+      "id": "k1_003",
+      "name": "帆布购物袋",
+      "category": "装饰",
+      "price": 15.0,
+      "material": "帆布",
+      "eco_label": true,
+      "durability": 4
+    },
+    {
+      "id": "k1_004",
+      "name": "一次性塑料袋",
+      "category": "装饰",
+      "price": 1.5,
+      "material": "塑料",
+      "eco_label": false,
+      "durability": 1
+    },
+    {
+      "id": "k1_005",
+      "name": "木质签字笔",
+      "category": "文具",
+      "price": 12.0,
+      "material": "木材",
+      "eco_label": true
+    },
+    {
+      "id": "k1_006",
+      "name": "塑料圆珠笔 12支",
+      "category": "文具",
+      "price": 8.0,
+      "material": "塑料"
+    },
+    {
+      "id": "k1_007",
+      "name": "铝制奖牌",
+      "category": "奖品",
+      "price": 35.0,
+      "material": "铝",
+      "eco_label": true
+    },
+    {
+      "id": "k1_008",
+      "name": "塑料奖牌",
+      "category": "奖品",
+      "price": 5.0,
+      "material": "塑料"
+    },
+    {
+      "id": "k1_009",
+      "name": "再生纸笔记本 A5",
+      "category": "文具",
+      "price": 9.8,
+      "eco_label": true
+    },
+    {
+      "id": "k1_010",
+      "name": "标准笔记本 A5",
+      "category": "文具",
+      "price": 6.5
+    },
+    {
+      "id": "k1_011",
+      "name": "环保贴纸 50 张",
+      "category": "装饰",
+      "price": 18.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_012",
+      "name": "PVC 贴纸 50 张",
+      "category": "装饰",
+      "price": 12.0
+    },
+    {
+      "id": "k1_013",
+      "name": "玻璃水瓶 750ml",
+      "category": "饮用水",
+      "price": 42.0,
+      "eco_label": true,
+      "durability": 5
+    },
+    {
+      "id": "k1_014",
+      "name": "一次性塑料杯 100 只",
+      "category": "饮用水",
+      "price": 15.0
+    },
+    {
+      "id": "k1_015",
+      "name": "竹制吸管 12 支",
+      "category": "饮用水",
+      "price": 10.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_016",
+      "name": "塑料吸管 100 支",
+      "category": "饮用水",
+      "price": 3.0
+    },
+    {
+      "id": "k1_017",
+      "name": "金属钥匙扣",
+      "category": "奖品",
+      "price": 22.0
+    },
+    {
+      "id": "k1_018",
+      "name": "塑料钥匙扣 10 只",
+      "category": "奖品",
+      "price": 4.5
+    },
+    {
+      "id": "k1_019",
+      "name": "有机棉托特包",
+      "category": "装饰",
+      "price": 48.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_020",
+      "name": "尼龙托特包",
+      "category": "装饰",
+      "price": 25.0
+    },
+    {
+      "id": "k1_021",
+      "name": "陶瓷马克杯",
+      "category": "奖品",
+      "price": 32.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_022",
+      "name": "塑料马克杯",
+      "category": "奖品",
+      "price": 8.5
+    },
+    {
+      "id": "k1_023",
+      "name": "可回收铅笔 12 支",
+      "category": "文具",
+      "price": 11.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_024",
+      "name": "塑料尺 30cm",
+      "category": "文具",
+      "price": 2.0
+    },
+    {
+      "id": "k1_025",
+      "name": "不锈钢勺子",
+      "category": "饮用水",
+      "price": 18.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_026",
+      "name": "塑料勺 50 只",
+      "category": "饮用水",
+      "price": 4.0
+    },
+    {
+      "id": "k1_027",
+      "name": "竹制杯垫 4 只",
+      "category": "装饰",
+      "price": 20.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_028",
+      "name": "塑料杯垫 4 只",
+      "category": "装饰",
+      "price": 8.0
+    },
+    {
+      "id": "k1_029",
+      "name": "再生塑料笔 10 支",
+      "category": "文具",
+      "price": 14.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_030",
+      "name": "自动铅笔 10 只",
+      "category": "文具",
+      "price": 22.0
+    },
+    {
+      "id": "k1_031",
+      "name": "木质相框 8x10",
+      "category": "装饰",
+      "price": 38.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_032",
+      "name": "塑料相框 8x10",
+      "category": "装饰",
+      "price": 12.0
+    },
+    {
+      "id": "k1_033",
+      "name": "铝制水杯 500ml",
+      "category": "饮用水",
+      "price": 45.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_034",
+      "name": "纸杯 100 只",
+      "category": "饮用水",
+      "price": 9.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_035",
+      "name": "塑料手环 50 只",
+      "category": "奖品",
+      "price": 6.0
+    },
+    {
+      "id": "k1_036",
+      "name": "丝绸丝巾",
+      "category": "装饰",
+      "price": 95.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_037",
+      "name": "涤纶丝巾",
+      "category": "装饰",
+      "price": 28.0
+    },
+    {
+      "id": "k1_038",
+      "name": "竹纤维笔记本 A4",
+      "category": "文具",
+      "price": 24.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_039",
+      "name": "光面笔记本 A4",
+      "category": "文具",
+      "price": 16.0
+    },
+    {
+      "id": "k1_040",
+      "name": "软木板 30x40cm",
+      "category": "装饰",
+      "price": 55.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_041",
+      "name": "泡沫板 30x40cm",
+      "category": "装饰",
+      "price": 18.0
+    },
+    {
+      "id": "k1_042",
+      "name": "竹制叉子 20 支",
+      "category": "饮用水",
+      "price": 7.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_043",
+      "name": "塑料叉子 50 只",
+      "category": "饮用水",
+      "price": 3.5
+    },
+    {
+      "id": "k1_044",
+      "name": "亚麻收纳袋",
+      "category": "装饰",
+      "price": 35.0,
+      "eco_label": true
+    },
+    {
+      "id": "k1_045",
+      "name": "尼龙收纳袋",
+      "category": "装饰",
+      "price": 14.0
+    }
+  ],
+  "metadata": {
+    "total": 45,
+    "categories": [
+      "奖品",
+      "文具",
+      "装饰",
+      "饮用水"
+    ],
+    "eco_count": 22,
+    "prohibited_count": 3,
+    "price_min": 1.5,
+    "price_max": 95.0
+  }
+}
