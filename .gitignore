@@ -96,6 +96,11 @@ apps/server/data/audit.db
 apps/server/data/checkpoints/
 apps/server/logs/
 apps/server/memory_store/
+# Runtime data artifacts (per-session artifacts, regenerable — not part of the repo)
+apps/server/data/
+/data/
+# One-off probe/scratch scripts (not part of the project)
+.tmp/
 apps/server/temp_context.txt
 apps/server/test_ollama_req.json
 memory_store/

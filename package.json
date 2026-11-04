@@ -11,5 +11,6 @@
   },
   "dependencies": {
     "cross-env": "^10.1.0"
-  }
+  },
+  "license": "MIT"
 }

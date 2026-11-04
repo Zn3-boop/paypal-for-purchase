@@ -1,0 +1,39 @@
+services:
+  server:
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=development
+      - PAYMENT_MODE=mock
+      - LLM_MODE=mock
+      - CORS_ALLOW_ALL=true
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - PAYPAL_MODE=sandbox
+      - PAYPAL_SANDBOX_API=https://api-m.sandbox.paypal.com
+      - CHANNEL3_API_KEY=${CHANNEL3_API_KEY:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=https://maas.qianwenaiapi.com/compatible-mode/v1
+      - LLM_MODEL=qwen3.8-flash
+    volumes:
+      - ./apps/server:/app
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    depends_on:
+      server:
+        condition: service_healthy
