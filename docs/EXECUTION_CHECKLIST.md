@@ -95,22 +95,29 @@
 3. **额外事件与操作一一对应**：`conflict_detected`（350 新增时与 600 并存，比例 1.7x）/
    `budget_violated` + `fallback_triggered`（D2 门 400，overage 43.0）/ `cart_modified`（删 3 件）。
 
-主线 5 步完整序列（12 事件）：
+主线 v3 完整序列（13 事件，具名版；#1–#9 为 UI 可录逐字实测，#10–#13 经
+API 改单分支产出——前端无改单入口，见 seed「陷阱 D」）：
 
 | # | 事件 | 关键数据 |
 |---|---|---|
-| 1 | `constraint_changed` | added 600 |
+| 1 | `constraint_changed` | added 600（source=成员A，具名句式） |
 | 2 | `plan_generated` | A $26.0 / 8 件，B $393.0 / 8 件 |
-| 3 | `conflict_detected` | 600 vs 350（比例 1.7x） |
-| 4 | `constraint_changed` | added 350 |
-| 5 | `review_confirmed` | final_total **393.0**，plan_id B（第 1 次点"确认支付"落账） |
-| 6 | `order_status_changed` | draft→confirmed |
-| 7 | `budget_violated` | limit 350.0 / actual 393.0 / resolution 超支 43.00 |
-| 8 | `fallback_triggered` | reason=支付前预算守卫拦截 393.00 > 350.00 |
-| 9 | `cart_modified` | batch_update ids=3，393.0→285.0 |
-| 10 | `order_status_changed` | confirmed→paying |
-| 11 | `payment_completed` | final_total **285.0** |
-| 12 | `order_status_changed` | paying→paid |
+| 3 | `constraint_changed` | added 350（source=成员B） |
+| 4 | `constraint_changed` | added preference 环保材质（source=成员C） |
+| 5 | `conflict_detected` | 600 vs 350（比例 1.7x） |
+| 6 | `review_confirmed` | final_total **393.0**，plan_id B |
+| 7 | `order_status_changed` | draft→confirmed |
+| 8 | `budget_violated` | limit 350.0 / actual 393.0 / resolution 超支 43.00 |
+| 9 | `fallback_triggered` | reason=支付前预算守卫拦截 393.00 > 350.00 |
+| 10 | `cart_modified` | batch_update ids=3，393.0→285.0（API 分支） |
+| 11 | `order_status_changed` | confirmed→paying（API 分支） |
+| 12 | `payment_completed` | final_total **285.0**（API 分支） |
+| 13 | `order_status_changed` | paying→paid（API 分支） |
+
+> 脚注：`conflict_detected` 的落账位置随消息拆分浮动——本具名版实测在两次
+> `constraint_changed` 之后（#3/#4→#5）；旧无名版曾出现在 added 350 之前。
+> 三条验收口径都是结构性的（类型覆盖 / 生命周期五连 / 额外事件映射），**不吃这个
+> 相对位置方差**：对表只核对「事件在、生命周期有序、额外事件数对得上」，不逐行锁死相邻关系。
 
 取消分支（**必须全新 session**）：`paying→cancelled` 转移 + 取消后重建单的**第二次**
 `review_confirmed`（该 session 共 11 事件，OrdersTab 一屏 cancelled + paid 双终态）。
@@ -136,7 +143,7 @@
 
 ### Demo 收尾
 - ~~K3 完整流程复跑（旧 6 步话术 + 预算 350 兜底 + 断网降级）~~ ✅ 2026-11-04（口径已修订，见下行）
-- K3 主线按**修订口径**复跑：5 步主线 + 12 事件三条验收（`scripts/demo_seed_script.md` 已同步）+ 新 session 取消分支
+- K3 主线按**修订口径**复跑：v3 具名 5 步主线 + 13 事件三条验收（`scripts/demo_seed_script.md` 已同步；285 支付分支走 API 镜头）+ 新 session 取消分支
 - K4 录屏（含备份视频）
 - ~~K5 Devpost 文案（定位段 + 技术亮点五条）~~ ✅ `docs/DEVPOST_SUBMISSION.md`
 
@@ -156,7 +163,7 @@
 | 未点确认前 AI 无法发起支付 | ✅ | HITL 闸门 + create_order 金额强校验 |
 | 支付后订单状态可自然语言查询 | ✅ | H4 `/orders/query`（服务端注入 session + 归属强制） |
 | 审计日志完整记录一轮全部动作 | ✅ | I2/I3 + 9 事件埋点（含 order_status_changed） |
-| K3 主线审计口径（5 步 / 12 事件） | ✅ 2026-11-04 探针 | 三条：类型覆盖 `MISSING=[]`／生命周期严格有序（review→draft→confirmed→paying→payment_completed→paid）／额外事件与操作一一对应。权威表见「K3 权威事件序列」；**不用事件条数对齐** |
+| K3 主线审计口径（v3 具名 5 步 / 13 事件） | ✅ 2026-11-04 探针 | 三条：类型覆盖 `MISSING=[]`／生命周期严格有序（review→draft→confirmed→paying→payment_completed→paid）／额外事件与操作一一对应。权威表见「K3 权威事件序列」；**不用事件条数对齐**。注：#10–#13 经 API 改单分支产出（前端无改单入口，见 seed 陷阱 D） |
 | 断网/超时 → Mock 降级成功 | ✅ | Channel3 异常实测切 K1 45 件（2026-11-03 探针） |
 | 启动 import-smoke（`import app.main` 失败即红灯） | ✅ | 每次提交前跑 `cd apps/server; python -c "import app.main"`（2026-11-04 加入，防 provider.py 型"启动即毁"） |
 
