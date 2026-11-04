@@ -37,6 +37,35 @@ LLMs are great at *deciding*; they are dangerous at *spending*. This demo answer
 - **How does the user regain control?** -> HITL approval gate (`approve` / `reject` / `modify`),
   and the agent must explain afterwards with graded evidence.
 
+## Group Purchase mode: the boundary is even stricter
+
+The payment tab above is *single-purchase* authorization. The app also ships a **group
+purchase** flow (ECV 社团采购) where the same principle scales up: **the human holds final
+transaction authority at every stage**, and the agent's hooks are mechanically prevented from
+crossing it.
+
+- **约束优先，改动能解释** — hard constraints (budget caps, taboos) pre-filter the catalog
+  before any strategy runs. Natural-language additions still need the LLM to extract a
+  structured constraint, but **delete intents never reach the LLM**: the front end matches
+  your words against the existing constraints and only asks the server to `DELETE` a specific
+  one (0-hit / multi-hit / add+delete mixes are surfaced, never silently guessed).
+- **AI 无支付发起权** — `create_order` is the *only* payment trigger and it must pass the
+  HITL review confirmation first: `draft → confirmed` is guarded by an audit record of your
+  review, `confirmed → paying` is guarded by a budget PASS, and the amount is **never taken
+  from the front-end body** - it is re-derived from the session cart server-side. Repeated
+  clicks while paying are idempotent: the same PayPal approval URL is returned, no second
+  order is created.
+- **实扣对账副门** — `paying → paid` only happens after the PayPal capture amount matches
+  the recorded order amount exactly (to the cent). A mismatch is *not* silently forgiven: it
+  writes a `payment_amount_mismatch` audit event and cancels the order.
+- **订单查询只读** — natural-language order queries are read-only and session-ownership
+  enforced by the server: a foreign `ord_xxx` in your question is answered“not found”, never
+  leaked; queries never touch the state machine.
+- **审计留痕不是装饰** — every decision above lands in an append-only JSONL audit timeline:
+  constraint changes, plan generation, cart edits, review confirmation, each state-machine
+  transition, payment completion and guardrail failures - the story of *why* money moved is
+  inspectable end to end.
+
 ## Architecture
 
 ```
@@ -99,6 +128,18 @@ Open http://localhost:3000 and land on the Payment tab.
 | `PAYPAL_MODE` | `sandbox` | `sandbox` for demo |
 | `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET` | - | merchant app credentials from the PayPal Developer Dashboard (Business account); required only for `PAYMENT_MODE=real` |
 | `PAYPAL_SANDBOX_API` | `https://api-m.sandbox.paypal.com` | sandbox API base |
+
+## Real Mode (评委演示用)
+
+若需演示真实链路，按以下三步切换（`.env` 不提交到 git）：
+
+1. `PAYMENT_MODE=real` — 走 PayPal 沙盒 API（需填 `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET`）。
+2. `LLM_MODE=real` — 走真实 LLM（需填 `LLM_API_KEY`，端点 `LLM_BASE_URL`）。
+3. `CHANNEL3_API_KEY=<你的 key>` — 走 Channel3 真实商品搜索；为空则自动降级到本地 K1 catalog。
+
+启动时服务端会打印一行模式声明，例如：
+`[mode] llm=real | payment=real | paypal=sandbox | channel3=real`
+评委可据此确认演示时处于预期的真实/降级路径。
 
 ## Demo script (话术)
 

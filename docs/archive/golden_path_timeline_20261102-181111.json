@@ -1,0 +1,399 @@
+{
+  "session_id": "golden-20261102-181106",
+  "order": {
+    "order_id": "ord_08ab5440",
+    "session_id": "golden-20261102-181106",
+    "user_id": "demo-user@example.com",
+    "total": 24.5,
+    "currency": "USD",
+    "plan_id": "A",
+    "paypal_token": "FAKE-ORDER-000001",
+    "items_count": 7,
+    "items": [
+      {
+        "id": "k1_024",
+        "name": "塑料尺 30cm",
+        "price": 2.0,
+        "quantity": 1,
+        "category": "文具"
+      },
+      {
+        "id": "k1_002",
+        "name": "一次性塑料水瓶 500ml",
+        "price": 2.5,
+        "quantity": 1,
+        "category": "饮用水"
+      },
+      {
+        "id": "k1_016",
+        "name": "塑料吸管 100 支",
+        "price": 3.0,
+        "quantity": 1,
+        "category": "饮用水"
+      },
+      {
+        "id": "k1_043",
+        "name": "塑料叉子 50 只",
+        "price": 3.5,
+        "quantity": 1,
+        "category": "饮用水"
+      },
+      {
+        "id": "k1_026",
+        "name": "塑料勺 50 只",
+        "price": 4.0,
+        "quantity": 1,
+        "category": "饮用水"
+      },
+      {
+        "id": "k1_018",
+        "name": "塑料钥匙扣 10 只",
+        "price": 4.5,
+        "quantity": 1,
+        "category": "奖品"
+      },
+      {
+        "id": "k1_008",
+        "name": "塑料奖牌",
+        "price": 5.0,
+        "quantity": 1,
+        "category": "奖品"
+      }
+    ],
+    "status": "paid",
+    "created_at": "2026-11-02T10:11:11.877699+00:00",
+    "updated_at": "2026-11-02T10:11:11.883399+00:00",
+    "cancelled_reason": null,
+    "transitions": [
+      {
+        "from": "draft",
+        "to": "confirmed",
+        "at": "2026-11-02T10:11:11.878349+00:00",
+        "actor": "user",
+        "reason": "人工复核通过"
+      },
+      {
+        "from": "confirmed",
+        "to": "paying",
+        "at": "2026-11-02T10:11:11.878825+00:00",
+        "actor": "system",
+        "reason": "发起 PayPal 支付"
+      },
+      {
+        "from": "paying",
+        "to": "paid",
+        "at": "2026-11-02T10:11:11.883392+00:00",
+        "actor": "paypal_callback",
+        "reason": "PayPal capture 成功，金额 24.50"
+      }
+    ]
+  },
+  "events": [
+    {
+      "timestamp": "2026-11-02T10:11:11.883407+00:00",
+      "round_num": 0,
+      "event": "order_status_changed",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user@example.com",
+      "actor": "paypal_callback",
+      "data": {
+        "order_id": "ord_08ab5440",
+        "from_status": "paying",
+        "to_status": "paid",
+        "reason": "PayPal capture 成功，金额 24.50"
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": null
+    },
+    {
+      "timestamp": "2026-11-02T10:11:11.882712+00:00",
+      "round_num": 0,
+      "event": "payment_completed",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user@example.com",
+      "actor": "paypal_callback",
+      "data": {
+        "order_id": "ord_08ab5440",
+        "payment_method": "paypal_sandbox",
+        "final_total": 24.5,
+        "split_details": []
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": null
+    },
+    {
+      "timestamp": "2026-11-02T10:11:11.878834+00:00",
+      "round_num": 0,
+      "event": "order_status_changed",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user@example.com",
+      "actor": "system",
+      "data": {
+        "order_id": "ord_08ab5440",
+        "from_status": "confirmed",
+        "to_status": "paying",
+        "reason": "发起 PayPal 支付"
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": null
+    },
+    {
+      "timestamp": "2026-11-02T10:11:11.878362+00:00",
+      "round_num": 0,
+      "event": "order_status_changed",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user@example.com",
+      "actor": "user",
+      "data": {
+        "order_id": "ord_08ab5440",
+        "from_status": "draft",
+        "to_status": "confirmed",
+        "reason": "人工复核通过"
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": null
+    },
+    {
+      "timestamp": "2026-11-02T10:11:11.877727+00:00",
+      "round_num": 0,
+      "event": "review_confirmed",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user@example.com",
+      "actor": "user",
+      "data": {
+        "final_total": 24.5,
+        "item_count": 7,
+        "split_preview": [],
+        "risks_acknowledged": true,
+        "order_id": "ord_08ab5440",
+        "plan_id": "A"
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": [
+        {
+          "id": "k1_024",
+          "name": "塑料尺 30cm",
+          "price": 2.0,
+          "quantity": 1,
+          "category": "文具"
+        },
+        {
+          "id": "k1_002",
+          "name": "一次性塑料水瓶 500ml",
+          "price": 2.5,
+          "quantity": 1,
+          "category": "饮用水"
+        },
+        {
+          "id": "k1_016",
+          "name": "塑料吸管 100 支",
+          "price": 3.0,
+          "quantity": 1,
+          "category": "饮用水"
+        },
+        {
+          "id": "k1_043",
+          "name": "塑料叉子 50 只",
+          "price": 3.5,
+          "quantity": 1,
+          "category": "饮用水"
+        },
+        {
+          "id": "k1_026",
+          "name": "塑料勺 50 只",
+          "price": 4.0,
+          "quantity": 1,
+          "category": "饮用水"
+        },
+        {
+          "id": "k1_018",
+          "name": "塑料钥匙扣 10 只",
+          "price": 4.5,
+          "quantity": 1,
+          "category": "奖品"
+        },
+        {
+          "id": "k1_008",
+          "name": "塑料奖牌",
+          "price": 5.0,
+          "quantity": 1,
+          "category": "奖品"
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-02T10:11:11.863034+00:00",
+      "round_num": 0,
+      "event": "cart_modified",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user",
+      "actor": "user",
+      "data": {
+        "modification_type": "batch_update",
+        "item_ids": [
+          "k1_004"
+        ],
+        "old_total": 26.0,
+        "new_total": 24.5
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": null
+    },
+    {
+      "timestamp": "2026-11-02T10:11:06.891851+00:00",
+      "round_num": 0,
+      "event": "plan_generated",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user",
+      "actor": "plans_api",
+      "data": {
+        "plan_id": "A",
+        "total": 26.0,
+        "item_count": 8,
+        "trade_offs": [
+          "选择了平价款，可能在耐用性和品牌上有所妥协"
+        ],
+        "risks": [
+          "最终支付需用户在 PayPal 页面点击确认，AI 无支付发起权"
+        ]
+      },
+      "constraint_snapshot": [
+        {
+          "id": "c_golden-20261102-181106_1",
+          "type": "budget",
+          "content": "Total budget not exceed $600",
+          "source": "member-A"
+        }
+      ],
+      "plan_snapshot": [
+        {
+          "id": "k1_004",
+          "name": "一次性塑料袋",
+          "category": "装饰",
+          "price": 1.5,
+          "quantity": 1,
+          "subtotal": 1.5,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_024",
+          "name": "塑料尺 30cm",
+          "category": "文具",
+          "price": 2.0,
+          "quantity": 1,
+          "subtotal": 2.0,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_002",
+          "name": "一次性塑料水瓶 500ml",
+          "category": "饮用水",
+          "price": 2.5,
+          "quantity": 1,
+          "subtotal": 2.5,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_016",
+          "name": "塑料吸管 100 支",
+          "category": "饮用水",
+          "price": 3.0,
+          "quantity": 1,
+          "subtotal": 3.0,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_043",
+          "name": "塑料叉子 50 只",
+          "category": "饮用水",
+          "price": 3.5,
+          "quantity": 1,
+          "subtotal": 3.5,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_026",
+          "name": "塑料勺 50 只",
+          "category": "饮用水",
+          "price": 4.0,
+          "quantity": 1,
+          "subtotal": 4.0,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_018",
+          "name": "塑料钥匙扣 10 只",
+          "category": "奖品",
+          "price": 4.5,
+          "quantity": 1,
+          "subtotal": 4.5,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        },
+        {
+          "id": "k1_008",
+          "name": "塑料奖牌",
+          "category": "奖品",
+          "price": 5.0,
+          "quantity": 1,
+          "subtotal": 5.0,
+          "matched_constraints": [],
+          "source": "local_catalog",
+          "rationale": ""
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-02T10:11:06.885909+00:00",
+      "round_num": 0,
+      "event": "constraint_changed",
+      "session_id": "golden-20261102-181106",
+      "user_id": "demo-user",
+      "actor": "constraints_api",
+      "data": {
+        "change_type": "added",
+        "constraint_id": "c_golden-20261102-181106_1",
+        "old_value": null,
+        "new_value": {
+          "id": "c_golden-20261102-181106_1",
+          "type": "budget",
+          "content": "Total budget not exceed $600",
+          "hard": true,
+          "source": "member-A",
+          "status": "active",
+          "created_at": "2026-11-02T10:11:06.885683+00:00",
+          "updated_at": "2026-11-02T10:11:06.885694+00:00",
+          "numeric_value": 600.0,
+          "category": null
+        }
+      },
+      "constraint_snapshot": null,
+      "plan_snapshot": null
+    }
+  ],
+  "expected_sequence": [
+    "constraint_changed",
+    "plan_generated",
+    "cart_modified",
+    "review_confirmed",
+    "order_status_changed",
+    "order_status_changed",
+    "payment_completed",
+    "order_status_changed"
+  ],
+  "matched": true,
+  "created_at": "2026-11-02T18:11:11.891475"
+}
