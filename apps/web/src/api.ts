@@ -155,6 +155,43 @@ export interface ConstraintsResponse {
   [key: string]: unknown
 }
 
+/**
+ * 确保后端存在该团购 session。
+ *
+ * 事故背景（2026-11-04）：前端只在 localStorage 生成 `web-<ts>-<rand>` 并永久复用，
+ * 从不调用创建接口；团购 session 是后端**进程内存**，后端一重启旧 id 就成孤儿，
+ * 约束/方案/购物车/订单全 404（储蓄目标不受影响是因为 GoalMemory 按 user 另存）。
+ *
+ * 规则：先查 `GET /session/{id}/status`，仅当 `exists === false` 才用
+ * `POST /session/reset` materialize —— 绝不 reset 已存在的会话，绝不误清已有状态。
+ * 同一页面生命周期内只执行一次（in-flight 去重，StrictMode 双挂载也安全）。
+ */
+const ensureInflight = new Map<string, Promise<void>>()
+
+export function ensureSession(sessionId: string, userId = 'demo-user'): Promise<void> {
+  if (!sessionId) return Promise.resolve()
+  const cached = ensureInflight.get(sessionId)
+  if (cached) return cached
+
+  const task = (async () => {
+    const statusResp = await fetch(`${API_BASE}/session/${encodeURIComponent(sessionId)}/status`)
+    if (statusResp.ok) {
+      const status = await statusResp.json().catch(() => null)
+      if (status?.exists) return
+    }
+    const resp = await fetch(`${API_BASE}/session/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, user_id: userId }),
+    })
+    if (!resp.ok) throw new Error(`Session bootstrap failed: ${resp.status}`)
+  })()
+
+  ensureInflight.set(sessionId, task)
+  task.catch(() => { ensureInflight.delete(sessionId) })
+  return task
+}
+
 export async function fetchConstraints(sessionId: string): Promise<ConstraintsResponse> {
   const resp = await fetch(`${API_BASE}/constraints?session_id=${encodeURIComponent(sessionId)}`)
   if (!resp.ok) {
@@ -474,6 +511,32 @@ export async function createOrder(req: CreateOrderRequest): Promise<CreateOrderR
   if (!resp.ok) {
     const body = await resp.json().catch(() => null)
     throw new Error(detailMessage(body?.detail, `Create order failed: ${resp.status}`))
+  }
+  return await resp.json()
+}
+
+// ===== Group purchase: cart modification（自然语言改单，供「预算拦截后改单重试」）=====
+export interface CartModifyResponse {
+  success: boolean
+  message?: string
+  diff?: { changed_items?: unknown[]; old_total?: number; new_total?: number }
+  guardrail?: { status?: string; message?: string | null }
+  cart?: { items?: unknown[]; total?: number }
+  fallback?: unknown
+  split_preview?: unknown
+  intent_summary?: unknown
+  warnings?: string[]
+}
+
+export async function modifyCart(sessionId: string, instruction: string): Promise<CartModifyResponse> {
+  const resp = await fetch(`${API_BASE}/cart/modify?session_id=${encodeURIComponent(sessionId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction }),
+  })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(detailMessage(body?.detail, `Modify cart failed: ${resp.status}`))
   }
   return await resp.json()
 }

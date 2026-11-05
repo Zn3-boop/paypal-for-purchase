@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction, RefObject } from 'react'
 import { sx } from '../sx'
 import { useSpeechInput } from '../../hooks/useSpeechInput'
@@ -157,6 +157,20 @@ export function PaymentTab(props: Props) {
     engine: micEngine, error: micError, toggle: toggleMic,
   } = useSpeechInput((t) => setChatMsg(t))
 
+  // 真实 LLM 链路一次要 30–200s，之前界面上只有 Send 变"…"、聊天区全空 → 看起来像"没输出"。
+  // 这里给秒级等待反馈（不改后端，只补可见性）。
+  const [waitingSec, setWaitingSec] = useState(0)
+  const waitStartRef = useRef(0)
+  useEffect(() => {
+    if (!loading) return
+    waitStartRef.current = Date.now()
+    const id = setInterval(
+      () => setWaitingSec(Math.floor((Date.now() - waitStartRef.current) / 1000)),
+      250,
+    )
+    return () => clearInterval(id)
+  }, [loading])
+
   const decidedOk = (m: { role: string; text: string; res?: PaymentAgentResponse }) =>
     m.role === 'agent' && m.res && m.res.needs_approval === false &&
     (m.res.status === 'approved' || m.res.status === 'captured')
@@ -179,6 +193,11 @@ export function PaymentTab(props: Props) {
           说一句话让代理为你下单，它在授权边界内自动判断是否需要你确认。
           信任分会随你每次批准而上升——新用户每笔需确认，高信任后小额自动放行。
         </div>
+        <div style={{ fontSize: 11, color: '#FCD34D', marginTop: 6, lineHeight: 1.5 }}>
+          💡 这里擅长「买<strong>一件</strong>东西」（例：一张周五的爵士唱片）。多件 / 多人拼单请到
+          「📊 方案对比」：约束 → 生成方案 → 确认下单 → 一键跳转 PayPal 支付。
+        </div>
+
       </div>
 
       {/* 储蓄目标（P1 演示入口）：先立目标，后买享受型消费会被拦截审批 */}
@@ -213,6 +232,7 @@ export function PaymentTab(props: Props) {
         {history.length === 0 && (
           <div style={{ fontSize: 12, color: '#6B7280', padding: 12 }}>
             试着输入：<b>帮我买一张周五晚上听的爵士唱片</b>
+            <span style={{ color: '#4B5563' }}>（一次只买一件；多件拼单请去「📊 方案对比」）</span>
           </div>
         )}
         {history.map(m => {
@@ -269,6 +289,16 @@ export function PaymentTab(props: Props) {
           }
           return null
         })}
+        {loading && (
+          <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
+            <div style={{ background: '#111827', border: '1px dashed #3B82F6', borderRadius: 12, padding: '8px 12px', fontSize: 13, color: '#93C5FD', maxWidth: '86%' }}>
+              🤖 代理正在思考…{waitingSec > 0 ? ` ${waitingSec}s` : ''}
+              <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>
+                真实 LLM 链路，通常 30–200 秒（冷启动更久）；请勿重复点击
+              </div>
+            </div>
+          </div>
+        )}
         <div ref={endRef} />
       </div>
 

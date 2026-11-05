@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { PaymentTab } from './components/tabs/PaymentTab'
 import { ConstraintsDashboard } from './components/tabs/ConstraintsDashboard'
 import { PlansTab } from './components/tabs/PlansTab'
@@ -10,7 +10,7 @@ import { ToastProvider } from './components/ToastProvider'
 import { PaymentResult } from './components/PaymentResult'
 import { usePaymentAgent } from './hooks/usePaymentAgent'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { selectPlan } from './api'
+import { ensureSession, selectPlan } from './api'
 
 /** 支持 PayPal 回跳后深链到指定面板（如 /?tab=orders&order_id=...）。 */
 function initialPanel(): 'plans' | 'chat' | 'audit' | 'orders' {
@@ -32,6 +32,18 @@ function AppShell() {
   const { sessionId } = payment
   const [activePanel, setActivePanel] = useState<'plans' | 'chat' | 'audit' | 'orders'>(initialPanel)
   const [selectedPlanId, setSelectedPlanId] = useState<'A' | 'B' | null>(null)
+  const [sessionReady, setSessionReady] = useState(false)
+
+  // 后端重启会让 localStorage 里的旧 session id 变成孤儿（全站 404 "Session not found"）。
+  // 挂载时先确保会话存在（exists=false 才创建，不会误清已有会话），再挂载依赖它的面板，
+  // 避免首屏打出一串 404（这才是 2026-11-04 404 风暴的根因）。
+  useEffect(() => {
+    let alive = true
+    ensureSession(sessionId, 'demo-user')
+      .catch(err => console.warn('Session bootstrap failed:', err))
+      .finally(() => { if (alive) setSessionReady(true) })
+    return () => { alive = false }
+  }, [sessionId])
 
   const handleSelectPlan = useCallback(async (planId: 'A' | 'B') => {
     await selectPlan(sessionId, planId)
@@ -44,6 +56,12 @@ function AppShell() {
       <ErrorBoundary>
         <Header />
 
+        {!sessionReady ? (
+          <div style={{ padding: 24, textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>
+            正在初始化会话...
+          </div>
+        ) : (
+          <>
         {/* Panel 1: Constraints Dashboard */}
         <div style={{ marginBottom: 16 }}>
           <ConstraintsDashboard sessionId={sessionId} />
@@ -109,6 +127,8 @@ function AppShell() {
         {activePanel === 'orders' && <OrdersTab sessionId={sessionId} initialOrderId={initialOrderId()} />}
 
         {error && <div role="alert" style={{ color: '#FCA5A5', marginTop: 12, fontSize: 12 }}>{error}</div>}
+          </>
+        )}
       </ErrorBoundary>
       <Footer />
     </div>

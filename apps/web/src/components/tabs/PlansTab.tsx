@@ -6,7 +6,7 @@ import {
   type PlansComparison,
   type PlansResponse,
 } from '../../api'
-import { fetchSplitPreview, type SplitPreviewResponse, createOrder } from '../../api'
+import { fetchSplitPreview, type SplitPreviewResponse, createOrder, modifyCart } from '../../api'
 
 type Props = {
   sessionId: string
@@ -400,6 +400,13 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [modalError, setModalError] = useState<string | null>(null)
   const [confirmDisabled, setConfirmDisabled] = useState(false)
+  // 下单金额以**购物车**为准：预算拦截后可先改单，再在同一个弹窗里确认（服务端本来也只认购物车总价）
+  const [cartTotal, setCartTotal] = useState<number>(total)
+  const [cartCount, setCartCount] = useState<number>(itemCount)
+  const [editInstruction, setEditInstruction] = useState('删掉木质相框、铝制奖牌、亚麻收纳袋')
+  const [cartEditing, setCartEditing] = useState(false)
+  const [editNote, setEditNote] = useState<string | null>(null)
+  const [editError, setEditError] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -419,7 +426,7 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
     setModalError(null)
     try {
       const res = await createOrder({
-        amount: total,
+        amount: cartTotal,
         session_id: sessionId,
         user_email: 'user@example.com',
         item_name: `Group Purchase Plan ${plan.plan_id}`,
@@ -428,6 +435,42 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
     } catch (err) {
       setModalError(err instanceof Error ? err.message : '下单失败，请稍后再试')
       setConfirmDisabled(false)
+    }
+  }
+
+  /** 改单成功 = 服务端重算购物车；随后解锁"确认下单"，金额切到新总价。 */
+  const handleModifyCart = async () => {
+    const instruction = editInstruction.trim()
+    if (!instruction || cartEditing) return
+    setCartEditing(true)
+    setEditError(null)
+    setEditNote(null)
+    try {
+      const res = await modifyCart(sessionId, instruction)
+      if (!res.success) {
+        setEditError(res.message || res.guardrail?.message || '改单未生效，换个说法再试')
+        return
+      }
+      const nextTotal = res.cart?.total
+      const nextItems = res.cart?.items?.length
+      if (typeof nextTotal === 'number') setCartTotal(nextTotal)
+      if (typeof nextItems === 'number') setCartCount(nextItems)
+      setModalError(null)          // 预算拦截红字清掉，确认键重新可用
+      setConfirmDisabled(false)
+      setEditNote(
+        `已改单：${fmtUsd(res.diff?.old_total ?? total)} → ${fmtUsd(nextTotal ?? 0)}（${nextItems ?? 0} 件）`
+        + ' · 审计新增 cart_modified',
+      )
+      // 分摊随金额变化，重新拉一次（失败不影响下单主链）
+      setPreviewLoading(true)
+      fetchSplitPreview(sessionId)
+        .then(r => setPreview(r))
+        .catch(() => { /* 忽略 */ })
+        .finally(() => setPreviewLoading(false))
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : '改单失败')
+    } finally {
+      setCartEditing(false)
     }
   }
 
@@ -444,9 +487,14 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 4 }}>
-            方案 {plan.plan_id}: {plan.strategy} · {itemCount} 件商品
+            方案 {plan.plan_id}: {plan.strategy} · {cartCount} 件商品
           </div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#10B981' }}>总计 {fmtUsd(total)}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: '#10B981' }}>总计 {fmtUsd(cartTotal)}</div>
+          {Math.abs(cartTotal - total) > 0.005 && (
+            <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>
+              方案快照 {fmtUsd(total)} → 购物车改单后 {fmtUsd(cartTotal)}
+            </div>
+          )}
         </div>
 
         {/* === F2 分摊预览：弹窗打开时 fetch，loading 禁用确认按钮 === */}
@@ -504,6 +552,30 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
           </div>
         )}
 
+        {/* 购物车改单：预算拦截后可在同一弹窗里把 393 改到预算内，再点确认（Pinduoduo 式"改完直接付"） */}
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed #374151' }}>
+          <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>
+            🛒 购物车改单（可选）：例如「删掉木质相框、铝制奖牌、亚麻收纳袋」
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={editInstruction}
+              onChange={e => setEditInstruction(e.target.value)}
+              disabled={cartEditing}
+              style={{ flex: 1, padding: '7px 9px', borderRadius: 6, border: '1px solid #374151', background: '#111827', color: '#E5E7EB', fontSize: 12 }}
+            />
+            <button
+              onClick={handleModifyCart}
+              disabled={cartEditing || !editInstruction.trim()}
+              style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid #3B82F6', background: 'transparent', color: '#93C5FD', fontSize: 12, fontWeight: 600, cursor: cartEditing ? 'wait' : 'pointer', opacity: editInstruction.trim() ? 1 : 0.5 }}
+            >
+              {cartEditing ? '改单中…' : '执行改单'}
+            </button>
+          </div>
+          {editNote && <div style={{ fontSize: 11, color: '#6EE7B7', marginTop: 6 }}>{editNote}</div>}
+          {editError && <div style={{ fontSize: 11, color: '#FCA5A5', marginTop: 6 }}>⚠️ {editError}</div>}
+        </div>
+
         <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
           <button
             onClick={onClose}
@@ -516,7 +588,7 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
             disabled={confirmDisabled || previewLoading || !!previewError || !!modalError}
             style={{ flex: 1, padding: 10, borderRadius: 6, border: 'none', background: '#10B981', color: '#fff', cursor: (confirmDisabled || previewLoading || !!previewError || !!modalError) ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: 13, opacity: (confirmDisabled || previewLoading || !!previewError || !!modalError) ? 0.5 : 1 }}
           >
-            {previewLoading ? '计算分摊中…' : `确认下单 ${fmtUsd(total)}`}
+            {previewLoading ? '计算分摊中…' : `确认下单 ${fmtUsd(cartTotal)}`}
           </button>
         </div>
       </div>
