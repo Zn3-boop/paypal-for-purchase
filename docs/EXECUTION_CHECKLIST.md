@@ -95,16 +95,18 @@
 3. **额外事件与操作一一对应**：`conflict_detected`（350 新增时与 600 并存，比例 1.7x）/
    `budget_violated` + `fallback_triggered`（D2 门 400，overage 43.0）/ `cart_modified`（删 3 件）。
 
-主线 v3 完整序列（13 事件，具名版；#1–#9 为 UI 可录逐字实测，#10–#13 经
-API 改单分支产出——前端无改单入口，见 seed「陷阱 D」）：
+主线 v3 完整序列（13 事件，具名版；**v5 起 #1–#13 全部 UI 可达**：第 7 步 400 后
+同一弹窗内「🛒 购物车改单」→ 285 → 确认下单直接跳 PayPal → 回跳 paid。
+`plan_generated` 全程 1 条（快照语义）、`review_confirmed` 恰 1 条（订单复用不重复复核）。
+屏幕层**点击级待彩排复核**；对应 seed v5「陷阱 D（已解除）」与主线第 9–11 步）：
 
 | # | 事件 | 关键数据 |
 |---|---|---|
 | 1 | `constraint_changed` | added 600（source=成员A，具名句式） |
 | 2 | `plan_generated` | A $26.0 / 8 件，B $393.0 / 8 件 |
-| 3 | `constraint_changed` | added 350（source=成员B） |
-| 4 | `constraint_changed` | added preference 环保材质（source=成员C） |
-| 5 | `conflict_detected` | 600 vs 350（比例 1.7x） |
+| 3 | `conflict_detected` | 600 vs 350（比例 1.7x；实测紧邻 350 落账，早 1ms） |
+| 4 | `constraint_changed` | added 350（source=成员B） |
+| 5 | `constraint_changed` | added preference 环保材质（source=成员C） |
 | 6 | `review_confirmed` | final_total **393.0**，plan_id B |
 | 7 | `order_status_changed` | draft→confirmed |
 | 8 | `budget_violated` | limit 350.0 / actual 393.0 / resolution 超支 43.00 |
@@ -114,10 +116,10 @@ API 改单分支产出——前端无改单入口，见 seed「陷阱 D」）：
 | 12 | `payment_completed` | final_total **285.0**（API 分支） |
 | 13 | `order_status_changed` | paying→paid（API 分支） |
 
-> 脚注：`conflict_detected` 的落账位置随消息拆分浮动——本具名版实测在两次
-> `constraint_changed` 之后（#3/#4→#5）；旧无名版曾出现在 added 350 之前。
-> 三条验收口径都是结构性的（类型覆盖 / 生命周期五连 / 额外事件映射），**不吃这个
-> 相对位置方差**：对表只核对「事件在、生命周期有序、额外事件数对得上」，不逐行锁死相邻关系。
+> 脚注：`conflict_detected` 由"350 与 600 并存"触发，位置紧贴 350 的 `constraint_changed`
+> （2026-11-04 深夜 live 实测：conflict 早 1ms 落账，即上表 #3 在 #4 之前；旧无名版曾整体在其后）。
+> 三条验收口径都是结构性的（类型覆盖 / 生命周期五连 / 额外事件映射），**不吃这个相对位置方差**：
+> 对表只核对「事件在、生命周期有序、额外事件数对得上」，不逐行锁死相邻关系。
 
 取消分支（**必须全新 session**）：`paying→cancelled` 转移 + 取消后重建单的**第二次**
 `review_confirmed`（该 session 共 11 事件，OrdersTab 一屏 cancelled + paid 双终态）。

@@ -97,8 +97,13 @@ def _plan_a_snapshot(payload: dict) -> list[dict]:
 
 
 def run_a5_delete_boundary(client) -> dict:
-    """A5 边界证据：删除一条硬约束 → 重生成方案 → 方案内容变化 → 恢复。
+    """A5 边界证据：约束是规划输入 —— 删掉禁忌约束后重算，方案内容变化，再恢复。
 
+    快照语义（2026-11-04 起）：约束变更**不**触发重算，GET /plans 只回放首次生成的快照；
+    只有 /session/reset 能让快照失效。所以这里的"重生成"通过 reset 显式触发，
+    这恰好同时验证了两件事：
+      1. 改约束不会静默改写正在看的方案（快照不变）；
+      2. 约束确实参与方案装配（reset 后重算，内容按约束变化/恢复）。
     删除不是装饰性动作：约束参与前置过滤与方案装配。这里用方案内容（商品 id 集合）
     做断言，而不只看 200。为了不依赖商品池里恰好有“塑料”条目，禁忌词直接取自
     当前 Plan A 的一个商品名，确保该约束一定命中并在删除后恢复。
@@ -128,6 +133,20 @@ def run_a5_delete_boundary(client) -> dict:
     assert r.status_code == 200, f"a5 taboo constraint: {r.status_code} {r.text}"
     taboo_id = r.json()["constraint_id"]
 
+    # 快照语义断言：新约束只进约束面板，不改写方案（轮询安全）
+    replay_payload = client.get(f"/api/v1/plans?session_id={session_id}").json()
+    replay = _plan_a_snapshot(replay_payload)
+    assert {row["id"] for row in replay} == {row["id"] for row in baseline}, (
+        "a5: plan must stay a snapshot after a constraint change (no silent replan)"
+    )
+
+    # 显式失效（软 reset：保留全部约束）→ 重算 → 禁忌生效
+    r = client.post(
+        f"/api/v1/session/reset",
+        json={"session_id": session_id, "user_id": "demo-user", "hard_reset": False},
+    )
+    assert r.status_code == 200, f"a5 soft reset: {r.status_code} {r.text}"
+
     filtered_payload = client.get(f"/api/v1/plans?session_id={session_id}").json()
     filtered = _plan_a_snapshot(filtered_payload)
     filtered_ids = {row["id"] for row in filtered}
@@ -138,6 +157,12 @@ def run_a5_delete_boundary(client) -> dict:
 
     r = client.delete(f"/api/v1/constraints/{taboo_id}?session_id={session_id}")
     assert r.status_code == 200, f"a5 delete: {r.status_code} {r.text}"
+
+    r = client.post(
+        f"/api/v1/session/reset",
+        json={"session_id": session_id, "user_id": "demo-user", "hard_reset": False},
+    )
+    assert r.status_code == 200, f"a5 second soft reset: {r.status_code} {r.text}"
 
     restored_payload = client.get(f"/api/v1/plans?session_id={session_id}").json()
     restored = _plan_a_snapshot(restored_payload)
@@ -159,11 +184,12 @@ def run_a5_delete_boundary(client) -> dict:
         "baseline_ids": sorted(base_ids),
         "filtered_ids": sorted(filtered_ids),
         "restored_ids": sorted(restored_ids),
-        "content_changed_on_delete": False,
+        "snapshot_stable_across_constraint_change": True,
+        "content_changed_on_replan": True,
         "restored_on_reopen": True,
         "ok": True,
     }
-    print("A5 boundary: delete constraint → replan → content changed → reopen restored")
+    print("A5 boundary: delete constraint → replan(via reset) → content changed → reopen restored")
     print(f"  baseline : {sorted(base_ids)}")
     print(f"  filtered : {sorted(filtered_ids)}")
     print(f"  restored : {sorted(restored_ids)}")
