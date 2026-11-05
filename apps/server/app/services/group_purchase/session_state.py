@@ -155,6 +155,10 @@ class GroupPurchaseSession:
     plan_a: ShoppingPlan | None = None
     plan_b: ShoppingPlan | None = None
     selected_plan: ShoppingPlan | None = None
+
+    # GET /plans 首次生成的完整响应快照（快照语义：此后 GET 只回放，不再重算）。
+    # 只有 reset 会让它失效 —— 否则约束一变，轮询就会静默改写用户在看的方案。
+    plans_snapshot: dict[str, Any] | None = None
     
     # E 模块：购物车（改单后编辑中的商品列表）
     cart_items: list[PlanItem] = field(default_factory=list)
@@ -183,6 +187,7 @@ class GroupPurchaseSession:
             "plan_a": self.plan_a.to_dict() if self.plan_a else None,
             "plan_b": self.plan_b.to_dict() if self.plan_b else None,
             "selected_plan": self.selected_plan.to_dict() if self.selected_plan else None,
+            "plans_snapshot": self.plans_snapshot,
             "cart_items": [item.to_dict() for item in self.cart_items],
             "split_preview": self.split_preview.to_dict() if self.split_preview else None,
             "order_id": self.order_id,
@@ -213,6 +218,8 @@ class GroupPurchaseSession:
             session.plan_b = ShoppingPlan.from_dict(data["plan_b"])
         if data.get("selected_plan"):
             session.selected_plan = ShoppingPlan.from_dict(data["selected_plan"])
+        if data.get("plans_snapshot"):
+            session.plans_snapshot = data["plans_snapshot"]
         if data.get("cart_items"):
             session.cart_items = [PlanItem.from_dict(i) for i in data["cart_items"]]
         if data.get("split_preview"):
@@ -254,6 +261,7 @@ class GroupPurchaseSession:
         self.plan_a = None
         self.plan_b = None
         self.selected_plan = None
+        self.plans_snapshot = None
         self.cart_items = []
         self.split_preview = None
         self.order_id = None

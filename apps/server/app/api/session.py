@@ -60,6 +60,18 @@ async def reset_session(req: ResetRequest) -> ResetResponse:
             session.history = []
             session.split_preview = None
 
+        # 快照失效：GET /plans 是"会话内首次生成"的快照，reset 是唯一的重算入口。
+        # 不在这里清掉的话，录屏"NG 重来"会直接回放上一轮的方案；
+        # 而 A5 边界（删约束 → 重算 → 方案内容变化）也无从验证。
+        # 注意：plan_generated 审计写在磁盘 JSONL 上、append-only，reset 清不掉——
+        # 要一条干净的审计屏，请换新 session_id（见 scripts/demo_seed_script.md）。
+        session.plan_a = None
+        session.plan_b = None
+        session.selected_plan = None
+        session.plans_snapshot = None
+        if session.state in ("plan_generated", "reviewing", "confirmed", "completed"):
+            session.state = "constraint_collection"
+
         # 解除会话与订单的绑定，并取消仍在流程中的订单。
         # 否则重置后 session.order_id 仍指向旧订单（paid/cancelled），
         # 下一次 create_order 会直接 409「订单已支付/已取消」，且 paying 订单会让档案页无限轮询。

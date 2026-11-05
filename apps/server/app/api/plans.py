@@ -21,6 +21,22 @@ async def list_plans(session_id: str = Query(...)):
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        # ── 快照语义（这是设计决策，不是缓存失效语义，请勿"优化"回去）────────────
+        # 方案在每个会话内只生成一次（首次 GET），并把完整响应落进 session.plans_snapshot。
+        # 此后所有 GET —— 包括 PlansTab 的 5s 轮询 —— 只原样回放快照：不重算、不写审计。
+        #
+        # 为什么快照是对的（治理叙事因此更硬，而不是更弱）：
+        #   "约束收紧不会静默改写你已选的方案；守卫在支付时刻用最新约束把关。"
+        #   AI 不悄悄改你的购物车，人做最终决定。若这里改成"约束一变就重算"，那么
+        #   加 350 预算后方案 B 会在 5 秒内被静默改写 393→350，购物车随之合规，
+        #   支付前守卫（D2 主门）就永远不会触发 —— 整条治理主线在 UI 里消失。
+        #
+        # 失效方式只有两个：/session/reset（GroupPurchaseSession.reset_to_initial 同款）
+        # 或未来的显式"重新生成"动作。别无他途。
+        if session.plans_snapshot is not None:
+            # constraint_count 是会话元数据而非方案本身，按当前值返回（面板显示不落后）。
+            return {**session.plans_snapshot, "constraint_count": len(session.constraints or [])}
+
         constraints = session.constraints or []
         
         # Extract budget limit from hard budget constraints
@@ -164,19 +180,7 @@ async def list_plans(session_id: str = Query(...)):
         except Exception as log_err:
             logger.debug("Audit log failed for plan generation: %s", log_err)
 
-        # Persist generated plans back into the session so that downstream
-        # endpoints (/cart/select_plan, /cart/modify, review panel) can read them.
-        try:
-            from app.services.group_purchase.session_state import ShoppingPlan
-            session.plan_a = ShoppingPlan.from_dict(plan_a_data)
-            session.plan_b = ShoppingPlan.from_dict(plan_b_data)
-            if session.state == "constraint_collection":
-                session.state = "plan_generated"
-            update_session(session)
-        except Exception as persist_err:
-            logger.warning("Failed to persist plans into session: %s", persist_err)
-
-        return {
+        payload = {
             "feasible": True,
             "data_source": result.get("source", "k1_catalog"),
             "plans": plans_data,
@@ -184,6 +188,23 @@ async def list_plans(session_id: str = Query(...)):
             "budget_limit": budget_limit,
             "constraint_count": len(constraints),
         }
+
+        # Persist generated plans back into the session so that downstream
+        # endpoints (/cart/select_plan, /cart/modify, review panel) can read them.
+        # plans_snapshot 保存的是**本函数即将返回的完整响应**：后续 GET 直接回放它，
+        # 这样"载荷一致"是靠存下来保证的，而不是靠"planner 恰好是确定性的"。
+        try:
+            from app.services.group_purchase.session_state import ShoppingPlan
+            session.plan_a = ShoppingPlan.from_dict(plan_a_data)
+            session.plan_b = ShoppingPlan.from_dict(plan_b_data)
+            session.plans_snapshot = payload
+            if session.state == "constraint_collection":
+                session.state = "plan_generated"
+            update_session(session)
+        except Exception as persist_err:
+            logger.warning("Failed to persist plans into session: %s", persist_err)
+
+        return payload
 
     except HTTPException:
         raise
