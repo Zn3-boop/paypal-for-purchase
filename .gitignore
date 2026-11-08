@@ -184,6 +184,9 @@ apps/server/app/services/nutrition/
 # Nutrition feature data table (only consumed by the excluded nutrition service)
 apps/server/app/data/usda_foods.json
 
+# Internal planning document (local only; contains local paths and internal decision notes)
+PAYPAL_HACKATHON_PLAN.md
+
 # Internal engineering notes / recording scripts: kept locally, not part of the submission.
 # (They contain rehearsal-specific example numbers and must not be read as app defaults.)
 docs/EXECUTION_CHECKLIST.md

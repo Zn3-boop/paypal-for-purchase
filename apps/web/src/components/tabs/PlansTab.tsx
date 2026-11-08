@@ -8,6 +8,7 @@ import {
   type PlansResponse,
 } from '../../api'
 import { fetchSplitPreview, type SplitPreviewResponse, createOrder, modifyCart } from '../../api'
+import { RecommendationLane } from '../RecommendationLane'
 
 type Props = {
   sessionId: string
@@ -289,6 +290,14 @@ export function PlansTab({
         <DiffView planA={plans.planA} planB={plans.planB} comparison={comparison} />
       )}
 
+      {/* 第三条泳道：历史信号只在这里出现（A/B 刻意不用，才能被同一句需求复算） */}
+      <RecommendationLane
+        sessionId={sessionId}
+        planA={plans.planA}
+        planB={plans.planB}
+        refreshKey={refreshKey}
+      />
+
       {/* 双方案对比卡片（左右布局） */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12, alignItems: 'start' }}>
         {plans.planA && (
@@ -420,6 +429,9 @@ function DiffView({ planA, planB, comparison }: {
               <div>A：{comparison.criteria.objective_a}　·　B：{comparison.criteria.objective_b}</div>
               <div style={{ color: '#6B7280' }}>
                 {comparison.criteria.same_feasibility}　·　{comparison.criteria.evidence}
+              </div>
+              <div style={{ color: '#6B7280' }}>
+                A/B 只用本次需求的两个可复算目标，<b style={{ color: '#A78BFA' }}>不使用检索记忆</b> —— 记忆只在下方「第三条泳道」出现。
               </div>
             </div>
           )}

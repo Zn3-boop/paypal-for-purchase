@@ -427,6 +427,94 @@ export async function fetchSearchMemory(limit = 8): Promise<SearchMemoryResponse
   return resp.json()
 }
 
+/**
+ * Channel3 推荐卡：读侧推导的「第三条泳道」，与 A/B 方案平行、不混入对比。
+ * 每张卡都带出处（reason / basis / query_used / search_hits），评委可复算。
+ */
+export interface RecommendationCard {
+  id: string
+  name: string
+  category?: string
+  price: number
+  currency?: string
+  image_url?: string
+  tags?: string[]
+  match_score?: number
+  match_tags?: string[]
+  reason: string
+  basis?: 'search' | 'selection' | 'anchor' | 'none'
+  basis_value?: string
+  source?: 'channel3'
+}
+
+export interface RecommendationSignals {
+  recent_searches?: { query: string; count?: number; ts?: string }[]
+  last_selection?: {
+    plan_id?: string
+    total?: number
+    item_count?: number
+    items?: string[]
+    query?: string
+    ts?: string
+  } | null
+  selected_items?: string[]
+  anchor_texts?: string[]
+}
+
+export interface RecommendationsResponse {
+  items: RecommendationCard[]
+  source: 'channel3' | 'none'
+  query_used: string
+  display_query: string
+  search_hits: number
+  shown: number
+  signals: RecommendationSignals
+  channel3: { status: string; message?: string }
+  note?: string
+}
+
+export interface AddRecommendationResponse {
+  success: boolean
+  code?: string
+  message?: string
+  item?: { id?: string; name?: string; price?: number }
+  cart?: { items: unknown[]; total: number }
+  guardrail?: {
+    status: 'ok' | 'fail' | 'blocked' | 'no_budget'
+    ok: boolean
+    budget: number | null
+    total: number
+    overage: number | null
+    message: string
+  }
+}
+
+export async function fetchRecommendations(
+  sessionId: string,
+  limit = 3,
+): Promise<RecommendationsResponse> {
+  const resp = await fetch(
+    `${API_BASE}/recommendations?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`,
+  )
+  if (!resp.ok) throw new Error(`recommendations failed: ${resp.status}`)
+  return resp.json()
+}
+
+/** 加购走后端预算守卫：超硬预算默认 blocked 且购物车不变（force 才放行）。 */
+export async function addRecommendation(
+  sessionId: string,
+  itemId: string,
+  force = false,
+): Promise<AddRecommendationResponse> {
+  const resp = await fetch(`${API_BASE}/recommendations/add`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, item_id: itemId, force }),
+  })
+  if (!resp.ok) throw new Error(`add recommendation failed: ${resp.status}`)
+  return resp.json()
+}
+
 export async function submitIntent(sessionId: string, message: string): Promise<IntentResponse> {
   const resp = await fetch(
     `${API_BASE}/plans/intent?session_id=${encodeURIComponent(sessionId)}`,

@@ -24,3 +24,32 @@ def _isolate_graph_memory_store(tmp_path):
 
     _ms._store_instance = _ms.MemoryStore(store_dir=str(tmp_path / "memory_store"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_store(tmp_path, monkeypatch):
+    """Give every test a fresh session JSON directory.
+
+    Sessions now persist to `data/sessions/*.json`. Without isolation, sessions
+    created by one test (or by a previous manual demo run in the repo) would be
+    restored by `get_session()` in unrelated tests, turning "session not found"
+    assertions flaky. `SESSION_STORE_DIR` is read on every call, so a per-test
+    tmp_path fully isolates persistence.
+    """
+    monkeypatch.setenv("SESSION_STORE_DIR", str(tmp_path / "sessions"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_audit_store(tmp_path, monkeypatch):
+    """Keep audit JSONL out of the repo `data/` dir during tests.
+
+    `AuditLogger` is a process-wide singleton whose dir is read once, so both the
+    env var and the singleton must be reset per test.
+    """
+    from app.services.group_purchase import audit_log as _al
+
+    monkeypatch.setenv("AUDIT_LOG_STORE_DIR", str(tmp_path / "audit_logs"))
+    _al._global_logger = None
+    yield
+    _al._global_logger = None

@@ -54,6 +54,35 @@ class Constraint:
             "category": self.category,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "Constraint":
+        """从会话 JSON 恢复（与 to_dict 对称；未知 type/status 回落到安全默认）。"""
+        ctype = data.get("type")
+        if ctype not in ("budget", "functional", "taboo", "preference"):
+            ctype = "functional"
+        status = data.get("status")
+        if status not in ("active", "modified", "removed"):
+            status = "active"
+        numeric = data.get("numeric_value")
+        if numeric is not None:
+            try:
+                numeric = float(numeric)
+            except (TypeError, ValueError):
+                numeric = None
+        now = datetime.now(timezone.utc).isoformat()
+        return cls(
+            id=str(data.get("id") or ""),
+            type=ctype,
+            content=str(data.get("content") or ""),
+            hard=bool(data.get("hard", False)),
+            source=str(data.get("source") or ""),
+            status=status,
+            created_at=str(data.get("created_at") or now),
+            updated_at=str(data.get("updated_at") or now),
+            numeric_value=numeric,
+            category=data.get("category"),
+        )
+
 
 @dataclass
 class ConstraintConflict:

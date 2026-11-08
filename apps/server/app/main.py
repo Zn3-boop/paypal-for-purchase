@@ -30,6 +30,7 @@ from app.utils.response_cleaner import clean_fastapi_response_body
 from app.api import session as session_api
 from app.api import audit as audit_api
 from app.api import search_memory as search_memory_api
+from app.api import recommendations as recommendations_api
 
 # ========== Lifespan replaces the deprecated on_event("startup") ==========
 @asynccontextmanager
@@ -46,6 +47,14 @@ async def lifespan(app: FastAPI):
             print(f"[on-reconcile] Compensated {count} hanging paying->paid orders")
     except Exception as exc:
         print(f"[on-reconcile] Skipped: {exc}")
+    try:
+        from app.services.group_purchase.session_state import load_sessions_from_disk
+
+        restored = load_sessions_from_disk()
+        if restored:
+            print(f"[on-startup] Restored {restored} session(s) from disk")
+    except Exception as exc:
+        print(f"[on-startup] Session restore skipped: {exc}")
     yield
 
 
@@ -166,6 +175,7 @@ app.include_router(session_api.router, prefix=API_V1_PREFIX)
 app.include_router(audit_api.router, prefix=API_V1_PREFIX)
 app.include_router(orders.router, prefix=API_V1_PREFIX)
 app.include_router(search_memory_api.router, prefix=API_V1_PREFIX)
+app.include_router(recommendations_api.router, prefix=API_V1_PREFIX)
 
 
 # ========== Static SPA hosting (apps/web built into apps/server/static) ==========

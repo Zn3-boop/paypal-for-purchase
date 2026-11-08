@@ -43,7 +43,7 @@ These are **PayPal sandbox test accounts** — no real funds are involved.
 
 | Account | Email | Role |
 |---------|-------|------|
-| Buyer (Personal) | `sb-247g1r53552209@personal.example.com` | Log in at the PayPal approval page to confirm/authorize the order (shown in the Payment tab banner). |
+| Buyer (Personal) | `sb-247g1r53552209@personal.example.com` | Log in at the PayPal approval page to confirm/authorize the order (sandbox test account - no real money) |
 | Merchant (Business) | `sb-rw2kp53552213@business.example.com` | Used in the PayPal Developer Dashboard to create the app and obtain `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET`. |
 
 Sandbox credentials go in `apps/server/.env` (never commit real secrets):
@@ -112,28 +112,37 @@ PAYPAL_SANDBOX_SECRET=...
 
 ```bash
 cd apps/server
-python -m pytest tests/test_payment_subgraph_integration.py tests/test_payment_http_api.py tests/test_k2_fallback.py -q
+python -m pytest -q        # 132 tests
 ```
 
 Covered: payment-intent routing, authority verdicts (block / allow_auto / need_approval), HITL
 interrupt gate, approve / reject / modify end-to-end, mock vs real payment clients, HTTP API
-serialization, capture-failure hardening, and Channel3 timeout fallback.
+serialization, capture-failure hardening, Channel3 timeout fallback, plan-snapshot staleness,
+A/B comparison criteria + Pareto verdict, Channel3 retrieval memory, and restart persistence
+(`tests/test_restart_persistence.py`).
 
 ## 9. What judges see in the UI
 
-1. **Payment tab** (default) — yellow banner shows the sandbox buyer account.
-2. Set a savings goal (e.g. "I want to save for a camera").
-3. Ask to buy something (e.g. "a jazz record for Friday night") → agent stops for approval with a
-   reason (savings-goal conflict → blocked rule).
-4. Click **✓ Approve & Pay** → PayPal sandbox order created + captured.
-5. Trust score ticks up (A-grade evidence), explainability panel shows *why*, and the source badge
-   shows `○ Rule fallback` or `● Real LLM generated`.
+The web app opens on **🛒 选购方案** (plans) and has two more panels: **📜 审计时间轴** (audit) and
+**📦 订单档案** (orders). Nothing is preset — no budget, no constraints, no plans.
+
+1. Type your own request in the box, e.g. 「社团采购：预算不超过 500 美元，不要塑料，给户外活动用」
+   → that sentence's budget/taboo appear in the constraint dashboard and two plans render
+   (A low-price / B best-match) with the 📐 comparison criteria and the Channel3 evidence line.
+2. Click **选这个方案** → confirmation modal: amount, natural-language cart edit, budget guard,
+   split-bill preview. Try 「删掉最贵的那件」 and watch the total drop.
+3. Confirm → PayPal **sandbox** approval page (log in with the buyer account above) → approve.
+4. Back in the app: **订单档案** auto-expands the paid order with its state transitions, and
+   **审计时间轴** shows the full chain; ask 「我的订单到哪一步了？」 for a state-machine answer.
+5. Optional: restart the API, then reload — the session (constraints / plans / cart), orders, audit
+   timeline and 🧠 检索记忆 all come back from disk. Only a pending PayPal approval URL is
+   re-created, because that registry is in-memory.
 
 ## 10. Submission requirements satisfied
 
 - [ ] Public GitHub / Bitbucket / GitLab repository URL
 - [ ] MIT LICENSE at repo root (detectable on repository "About")
-- [ ] English README with setup + run instructions (`README.en.md`)
+- [ ] English README with setup + run instructions (`README.md`)
 - [ ] Test accounts + sandbox credentials documented above
 - [ ] Demo video (< 3 min) on YouTube (public link in submission form)
 - [ ] Text description in English

@@ -12,13 +12,20 @@
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.services.group_purchase.constraints import Constraint, ConstraintManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -300,37 +307,112 @@ class GroupPurchaseSession:
 _sessions: dict[str, GroupPurchaseSession] = {}
 _session_lock = threading.Lock()
 
+# ============================================================
+# 会话磁盘持久化：后端重启后，约束 / 方案 / 购物车 / 订单号都还在
+# ============================================================
+# 为什么是「每会话一个 JSON」而不是 JSONL：会话是**可变状态**（覆盖写），
+# 不是事件流；JSONL 适合审计/订单那种 append-only 事实。这里用原子写
+# （tmp + os.replace）保证进程被杀时不会留下半个 JSON。
+_SESSION_SCHEMA_VERSION = 1
+
+
+def get_sessions_dir() -> Path:
+    """会话目录（`SESSION_STORE_DIR` 可覆盖：测试用 tmp_path，部署可挂载卷）。"""
+    return Path(os.getenv("SESSION_STORE_DIR", "./data/sessions"))
+
+
+def get_session_file(session_id: str) -> Path:
+    """session_id → 安全文件名（只保留字母数字与 ._-，防止路径穿越）。"""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", session_id or "")[:120] or "unknown"
+    return get_sessions_dir() / f"{safe}.json"
+
+
+def save_session_to_disk(session: GroupPurchaseSession) -> bool:
+    """把会话写盘。失败只记日志，绝不阻断业务流程（支付链路优先）。"""
+    try:
+        payload = session.to_dict()
+        payload["schema_version"] = _SESSION_SCHEMA_VERSION
+        path = get_session_file(session.session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("session persist failed (%s): %s", session.session_id, exc)
+        return False
+
+
+def _load_session_file(session_id: str) -> GroupPurchaseSession | None:
+    path = get_session_file(session_id)
+    if not path.exists():
+        return None
+    try:
+        return GroupPurchaseSession.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        logger.warning("session restore failed (%s): %s", session_id, exc)
+        return None
+
+
+def load_sessions_from_disk() -> int:
+    """启动时回放 data/sessions/*.json；内存里已有的会话不会被覆盖。"""
+    directory = get_sessions_dir()
+    if not directory.exists():
+        return 0
+    restored = 0
+    for path in sorted(directory.glob("*.json")):
+        try:
+            session = GroupPurchaseSession.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            logger.warning("session restore skipped (%s): %s", path.name, exc)
+            continue
+        with _session_lock:
+            if session.session_id not in _sessions:
+                _sessions[session.session_id] = session
+                restored += 1
+    return restored
+
 
 def get_or_create_session(session_id: str, user_id: str) -> GroupPurchaseSession:
     """获取或创建会话。"""
     with _session_lock:
         if session_id not in _sessions:
-            _sessions[session_id] = GroupPurchaseSession(
-                session_id=session_id,
-                user_id=user_id,
-            )
+            session = GroupPurchaseSession(session_id=session_id, user_id=user_id)
+            _sessions[session_id] = session
+            save_session_to_disk(session)
+            return session
         return _sessions[session_id]
 
 
 def get_session(session_id: str) -> GroupPurchaseSession | None:
-    """获取会话。"""
+    """获取会话：内存优先；内存没有（例如刚重启）就从磁盘 JSON 恢复。"""
     with _session_lock:
-        return _sessions.get(session_id)
+        cached = _sessions.get(session_id)
+    if cached is not None:
+        return cached
+    restored = _load_session_file(session_id)
+    if restored is None:
+        return None
+    with _session_lock:
+        return _sessions.setdefault(session_id, restored)
 
 
 def update_session(session: GroupPurchaseSession) -> None:
-    """更新会话。"""
+    """更新会话：内存 + 磁盘（原子写）。"""
     with _session_lock:
         _sessions[session.session_id] = session
+    save_session_to_disk(session)
 
 
 def delete_session(session_id: str) -> bool:
-    """删除会话。"""
+    """删除会话（内存 + 磁盘文件）。"""
     with _session_lock:
-        if session_id in _sessions:
-            del _sessions[session_id]
-            return True
-        return False
+        existed = _sessions.pop(session_id, None) is not None
+    try:
+        get_session_file(session_id).unlink(missing_ok=True)
+    except OSError as exc:  # pragma: no cover
+        logger.warning("session file delete failed (%s): %s", session_id, exc)
+    return existed
 
 
 def list_sessions(user_id: str | None = None) -> list[GroupPurchaseSession]:

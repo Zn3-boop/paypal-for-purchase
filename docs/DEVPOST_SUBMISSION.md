@@ -64,6 +64,15 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
    last selected plan). Clicking an entry re-runs that exact sentence; history is never merged into
    the current Channel3 query, because pretending last week's taste is this week's intent would be
    fabricated relevance.
+8. **A third lane that complements (not contaminates) the comparison.** Under the A/B diff, the
+   ✨ 第三条泳道 · Channel3 推荐 strip re-runs **one real Channel3 query** anchored on the recent
+   searches and the last selected plan, and shows ≤3 cards. Each card states a three-part,
+   recomputable source — `你搜过「X」→ 本次检索「query_used」→ 命中 N 件，展示 3 件` — and is tagged
+   `已在方案 A` / `已在方案 B` / `两方案都没有`. It is a separate lane on purpose: folding history
+   into the candidate pool would make the same sentence produce different plans and break the
+   reproducibility of `comparison.criteria`. Adding a card to the cart is a real path (guardrail +
+   the existing `cart_modified` event, blocked over budget with the cart untouched), kept out of the
+   recorded golden path so the audit event table stays fixed.
 
 ## 3-minute demo path
 
@@ -91,18 +100,19 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
 - `create_order` double-click → same PayPal token/approval URL, gateway called once.
 - Order archive/query probes: `session_id` required (422), cross-session access 403, foreign
   order id answered without leaking, polling stops once no order is `paying`.
-- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **132 passed**
+- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **147 passed**
   (`tests/test_restart_persistence.py` covers restart recovery of the order archive and the audit
   timeline; `tests/test_comparison_criteria.py` pins the A/B criteria + Pareto verdict;
   `tests/test_search_memory.py` covers retrieval-memory dedupe and restart survival).
 
 ## Honest limitations
 
-- Session state (constraints / cart / plan snapshot) is in-memory (demo-grade): restarting the API
-  resets the live session and the pending PayPal approval-URL registry. **Order records and the
-  audit timeline are persisted** as JSONL (`data/orders/orders.jsonl`,
-  `data/audit_logs/<user>/audit_<date>.jsonl`) and reloaded on startup, so the order archive and
-  audit trail survive a restart even though the in-progress session does not.
+- Session state (constraints / cart / plan snapshot) is persisted per `session_id` as JSON under
+  `data/sessions/` and reloaded on startup (lazily on first access), so restarting the API does not
+  wipe an in-progress purchase. **Order records and the audit timeline are persisted** as JSONL
+  (`data/orders/orders.jsonl`, `data/audit_logs/<user>/audit_<date>.jsonl`). The only in-memory
+  piece is the pending PayPal approval-URL registry; the callback recovers the order from the
+  `session_id` in the return URL if it was lost.
 - Split payment is simulated with a payout schedule (single sandbox merchant account), not real
   multi-recipient payouts.
 - The K1 catalog is a curated mock dataset used as an offline fallback for Channel3.

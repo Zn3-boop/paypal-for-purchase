@@ -32,10 +32,11 @@ The app has three panels: **选购方案 / Plans**, **审计时间轴 / Audit**,
    `confirmed` -> `paying` -> `payment_completed` -> `paid`).
 6. Ask **「我的订单到哪一步了？」** -> the answer comes from the state machine, not from the LLM.
 
-Restarting the API clears the live session but **not** the audit timeline or the order archive:
-both are JSONL on disk and reloaded on startup (`tests/test_restart_persistence.py`). The
-🧠 **检索记忆** row under the request box also survives a restart and re-runs a previous search
-in one click (`tests/test_search_memory.py`).
+Restarting the API does **not** lose your work: live sessions (constraints, cart, plan snapshot),
+the order archive, the audit timeline and the 🧠 检索记忆 row are all on disk and reloaded on
+startup (`tests/test_session_persistence.py`, `tests/test_restart_persistence.py`,
+`tests/test_search_memory.py`). The only in-memory piece is the pending PayPal approval-URL map;
+if it is lost, the callback recovers the order from the `session_id` in the return URL.
 
 The single-purchase authorization-boundary subgraph described below is still fully wired at the
 API level (`POST /api/v1/payment/agent` -> `approve` -> `callback`, covered by the payment-agent
@@ -123,11 +124,45 @@ fake personalization (last week's taste silently contaminating this week's reque
 shortcut to re-run a search, and a visible record that Channel3 is being used across sessions
 (`GET /api/v1/search-memory`, `tests/test_search_memory.py`).
 
+### The third lane: Channel3 recommendations with a recomputable source
+
+The 🧠 row only re-runs an old sentence. The ✨ **第三条泳道 · Channel3 推荐** strip under the A/B
+diff actually **searches again**: it takes the recent queries plus the items of the last selected
+plan as anchors, sends **one** real Channel3 query, filters it with the same relevance gate the
+planner uses, drops anything already in the cart or already picked, and shows at most three cards.
+
+Each card carries a source a judge can verify instead of a label:
+
+```
+你搜过「社团采购 户外 装饰」2 次 → 本次检索「sports equipment | 社团采购 户外 装饰」→ 命中 14 件，展示 3 件
+```
+
+`query_used` is the literal string sent to Channel3 and `search_hits` is how many products came
+back — both in `GET /api/v1/recommendations`. Paste that query into Channel3 and you should see
+similar candidates; if you cannot, the card's "because" is decoration, not evidence.
+
+The recommendations are deliberately **not** folded into plans A/B: the comparison has to be
+reproducible from the request alone (same candidate pool, same two objectives). If yesterday's
+searches changed the pool, the same sentence would yield different plans and the `criteria` block
+would stop being checkable. So history is quarantined in this one lane — the UI says so, and every
+card is tagged `已在方案 A` / `已在方案 B` / `两方案都没有`, which is exactly how the lane complements
+the comparison rather than contaminating it.
+
+Adding a card to the cart uses the same guardrail as cart editing: over a hard budget it is
+**blocked with the cart untouched** (`guardrail.status="blocked"`; `force=true` to override), and it
+writes the existing `cart_modified` audit event with
+`modification_type="add_from_recommendation"` — no new event type, so the audit event table and
+`golden_path_verify.py` stay valid. If Channel3 is unavailable you get an empty list plus a
+`disabled`/`error` status, never local-catalog items dressed up as recommendations
+(`tests/test_recommendations.py`).
+
 ## What is deliberately demo-grade (honest limitations)
 
-- **No user login.** Sessions (`constraints`, cart, plan snapshot, pending PayPal approval URL) are
-  in-memory and disappear on restart; orders, audit events, and search memory are JSONL on disk and
-  reload on startup.
+- **No user login.** Sessions are keyed by `session_id` only, and are persisted as one JSON per
+  session under `data/sessions/` (`SESSION_STORE_DIR` overrides it): constraints, plans, cart and
+  order id survive a restart. Orders and audit events are append-only JSONL; search memory is
+  JSONL too. The **only** in-memory piece is the pending PayPal approval-URL map — the callback
+  falls back to the `session_id` in the return URL when that map is lost.
 - **Retrieval memory is team-wide**, not per-user (single-tenant demo).
 - **`match_score` is lexical** (title/tag overlap with the request), not a semantic or quality
   score. The UI says this in the comparison-criteria block.
@@ -266,7 +301,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 132 tests
+python -m pytest -q        # 147 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
