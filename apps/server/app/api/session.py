@@ -64,7 +64,7 @@ async def reset_session(req: ResetRequest) -> ResetResponse:
         # 不在这里清掉的话，录屏"NG 重来"会直接回放上一轮的方案；
         # 而 A5 边界（删约束 → 重算 → 方案内容变化）也无从验证。
         # 注意：plan_generated 审计写在磁盘 JSONL 上、append-only，reset 清不掉——
-        # 要一条干净的审计屏，请换新 session_id（见 scripts/demo_seed_script.md）。
+        # 要一条干净的审计屏，请换新 session_id（reset 清不掉磁盘上的 append-only 审计）。
         session.plan_a = None
         session.plan_b = None
         session.selected_plan = None

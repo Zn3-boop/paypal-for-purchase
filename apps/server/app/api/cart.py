@@ -34,6 +34,21 @@ async def select_plan(session_id: str = Query(...), plan_id: str = Query(...)):
     session.selected_plan = source_plan
     session.cart_items = [PlanItem.from_dict(item.to_dict()) for item in source_plan.items]
     update_session(session)
+
+    # 选择记忆：记录「选过哪个方案」，供下次用同一个检索词再看一次（只做回显）。
+    try:
+        from app.services.group_purchase.search_memory import record_selection
+
+        record_selection(
+            session_id=session_id,
+            user_id=getattr(session, "user_id", "") or "demo-user",
+            plan_id=plan_id,
+            total=round(sum(item.price * item.quantity for item in session.cart_items), 2),
+            item_names=[item.name for item in session.cart_items],
+            query=getattr(session, "intent_query", "") or "",
+        )
+    except Exception:
+        logger.debug("selection memory record failed", exc_info=True)
     
     return {
         "ok": True,

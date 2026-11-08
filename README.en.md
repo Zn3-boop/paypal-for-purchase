@@ -1,5 +1,8 @@
 # Agentic Payment - Authorization-Boundary Demo (PayPal Hackathon)
 
+> Canonical README: [README.md](./README.md). This file is kept as a stable link target for the
+> Devpost submission; if anything looks stale here, README.md is authoritative.
+
 > **The agent can spend your money - but only inside the authorization boundary you control.**
 
 A LangGraph agent that buys things for you and *explains every decision*: it routes purchase

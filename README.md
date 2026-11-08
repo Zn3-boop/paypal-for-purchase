@@ -11,20 +11,36 @@ Zero credentials required to run: `PAYMENT_MODE=mock` runs the full pipeline (ap
 create -> capture) against a mock PayPal client. Flip to `real` with sandbox credentials and
 the same flow hits `api-m.sandbox.paypal.com`.
 
-## 30-second judge path
+## Judge path (about 3 minutes, all in the web UI)
 
-1. Open the **Payment tab** (it is the default landing tab). The yellow banner shows the
-   **PayPal sandbox buyer account** - log in with it when the approval link opens.
-2. Set a savings goal in the 🎯 box: **「我要存钱买相机」** -> *已保存*.
-3. Ask: **「帮我买一张周五晚上听的爵士唱片」** -> the agent selects a jazz record, runs the
-   authorization engine, and **stops for your approval** with a reason (enjoyment spend
-   conflicts with the savings goal -> blocked rule). No order is created yet.
-4. Click **✓ 批准并支付** -> a PayPal sandbox order is created (mock or real) and captured.
-5. Watch the trust score tick up (A-grade approval evidence), the **可解释性证据** panel
-   showing *why*, and the **○ 规则兜底 / ● 真实 LLM 生成** source badge on every reply.
+The app has three panels: **选购方案 / Plans**, **审计时间轴 / Audit**, **订单档案 / Orders**.
 
-Repeat with small low-trust/low-amount flows and observe the trust score compounding across
-sessions (persisted per user via the memory store).
+1. In the request box type **your own** sentence — nothing is preset: no budget, no constraint, no
+   plan exists until you submit. Example shape:
+   **「社团采购：预算不超过 <你填的金额> 美元，不要 <你不想要的材质>，给户外活动用」**
+   -> only that sentence's budget/taboo are extracted into the dashboard, and two plans (**A**
+   low-price / **B** best-match) appear below with real trade-off numbers.
+2. Check the evidence line under the plans: the query actually sent to **Channel3**, how many
+   candidates came back, and which source was used (`channel3` or the local fallback catalog).
+3. Click **选这个方案** -> the confirmation modal opens with the amount, a natural-language cart
+   edit box, the budget guard result, and (in group mode) the split-bill preview.
+4. Type **「删掉最贵的那件」** -> the cart total really drops and the modal re-checks budget.
+   Confirm -> PayPal **sandbox** approval page -> approve.
+5. You land back on the app: the paid order auto-expands in **订单档案** with its state-machine
+   transitions, and **审计时间轴** shows the whole chain
+   (`constraint_changed` -> `plan_generated` -> `cart_modified` -> `review_confirmed` ->
+   `confirmed` -> `paying` -> `payment_completed` -> `paid`).
+6. Ask **「我的订单到哪一步了？」** -> the answer comes from the state machine, not from the LLM.
+
+Restarting the API clears the live session but **not** the audit timeline or the order archive:
+both are JSONL on disk and reloaded on startup (`tests/test_restart_persistence.py`). The
+🧠 **检索记忆** row under the request box also survives a restart and re-runs a previous search
+in one click (`tests/test_search_memory.py`).
+
+The single-purchase authorization-boundary subgraph described below is still fully wired at the
+API level (`POST /api/v1/payment/agent` -> `approve` -> `callback`, covered by the payment-agent
+integration tests). The web UI deliberately exposes only one checkout path per plan so the same
+purchase cannot be re-composed behind the user's back.
 
 ## Why an authorization boundary?
 
@@ -39,10 +55,10 @@ LLMs are great at *deciding*; they are dangerous at *spending*. This demo answer
 
 ## Group Purchase mode: the boundary is even stricter
 
-The payment tab above is *single-purchase* authorization. The app also ships a **group
-purchase** flow (ECV 社团采购) where the same principle scales up: **the human holds final
-transaction authority at every stage**, and the agent's hooks are mechanically prevented from
-crossing it.
+The single-purchase flow above is the same authorization boundary applied to one purchase. The app
+also ships a **group purchase** flow (ECV 社团采购) where the same principle scales up: **the human
+holds final transaction authority at every stage**, and the agent's hooks are mechanically
+prevented from crossing it.
 
 - **约束优先，改动能解释** — hard constraints (budget caps, taboos) pre-filter the catalog
   before any strategy runs. Natural-language additions still need the LLM to extract a
@@ -66,10 +82,61 @@ crossing it.
   transition, payment completion and guardrail failures - the story of *why* money moved is
   inspectable end to end.
 
+## How plans A and B are compared (and why a judge can check it)
+
+Both plans are assembled from the **same candidate pool** (hard constraints are applied first, then
+A and B run on that identical pool with the same budget cap and the same min/max item count). They
+differ only in their objective function:
+
+| Plan | Objective function | What it is *not* |
+|---|---|---|
+| **A — low price** | minimize total price under the budget cap | not "worse quality"; price is not a quality proxy |
+| **B — best match** | maximize the sum of Channel3 keyword-match scores (`match_score`) under the same cap | not "higher rated"; there are no ratings or reviews in the data |
+
+`GET /api/v1/plans` returns this contract in `comparison.criteria`, the raw numbers in
+`comparison.metrics` (`total_a/b`, `relevance_a/b`, item and shared counts), and a Pareto verdict in
+`comparison.pareto`:
+
+- `trade_off` — A is cheaper **and** B has the higher match score: both sit on the Pareto frontier,
+  so it is a genuine preference call, not "one plan is worse".
+- `a_dominates` / `b_dominates` — one plan is no worse on **both** axes. The UI says so explicitly
+  instead of dressing a dominated plan up as a trade-off.
+
+The UI prints the same three lines under **⚖️ 差异对比**, so the numbers on screen are the numbers
+in the API response. Regression tests: `tests/test_comparison_criteria.py`.
+
+Why this framing is defensible rather than invented: it is the standard constrained
+dual-objective comparison used by comparison-shopping surfaces (price axis vs relevance axis, with
+hard filters applied first), and the Pareto check is textbook multi-objective optimization. We do
+not claim B is "more durable" — nothing in the data supports durability, so the UI never says it.
+
+## Channel3 retrieval memory (search history, not profiling)
+
+Every submitted request is appended to `data/search_memory/searches.jsonl`, and every plan selection
+to `data/search_memory/selections.jsonl` (`SEARCH_MEMORY_DIR` overrides the location). The
+🧠 **检索记忆** row under the request box lists deduplicated recent queries (with how many times each
+was searched) plus the last selected plan (`方案 B · $393.00 · 8 件`). Clicking an entry re-submits
+that exact sentence — nothing else.
+
+Honest boundary: the history is **never** merged into the current Channel3 query. That would be
+fake personalization (last week's taste silently contaminating this week's request). The memory is a
+shortcut to re-run a search, and a visible record that Channel3 is being used across sessions
+(`GET /api/v1/search-memory`, `tests/test_search_memory.py`).
+
+## What is deliberately demo-grade (honest limitations)
+
+- **No user login.** Sessions (`constraints`, cart, plan snapshot, pending PayPal approval URL) are
+  in-memory and disappear on restart; orders, audit events, and search memory are JSONL on disk and
+  reload on startup.
+- **Retrieval memory is team-wide**, not per-user (single-tenant demo).
+- **`match_score` is lexical** (title/tag overlap with the request), not a semantic or quality
+  score. The UI says this in the comparison-criteria block.
+- **PayPal is sandbox only.** Real capture is mocked in `PAYMENT_MODE=mock`.
+
 ## Architecture
 
 ```
-Web Frontend (React + Vite) -- PaymentTab -- /payment/agent, /payment/approve, /payment/goal
+Web Frontend (React + Vite) -- Plans / Audit / Orders panels -- /plans/intent | /cart | /orders
         |
         v
 FastAPI (apps/server) -- build_agent_graph() -- LangGraph (compiled, singleton + MemorySaver)
@@ -92,29 +159,39 @@ agent loop.
 
 ## Data Source
 This prototype supports two interchangeable data sources for demo:
-1. Channel3 API (official hackathon sponsor)
-2. Local mock dataset, as fallback for stable demo
+1. Channel3 API (official hackathon sponsor) - real product search, normalized into the local item shape.
+2. Local mock dataset (`catalog_k1`), used as an honest fallback when Channel3 is unavailable or returns nothing relevant.
+
+Channel3 results are filtered for relevance to the request, same-name + same-price duplicates are
+dropped, and items that came back but did not match are shown *separately* as "closest results"
+(`sponsor_related`) - they never enter a plan as if they were matches.
 
 ## Quick start
 
-Requirements: **Python 3.12+**, **Node.js 20+**, **pnpm**.
+Requirements: **Python 3.12+**, **Node.js 20+** (npm is enough).
 
 ```bash
+# 0. Clone
+git clone https://github.com/Zn3-boop/paypal-for-purchase.git
+cd paypal-for-purchase
+
 # 1. Backend
 cd apps/server
-python -m venv .venv && .venv\Scripts\activate        # (Windows) / source .venv/bin/activate
+python -m venv .venv && .venv\Scripts\activate        # Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env                                # (Windows) / cp .env.example .env
+copy .env.example .env                                # Windows: copy | macOS/Linux: cp
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# 2. Frontend (second terminal)
-pnpm install
-pnpm --dir apps/web dev                               # http://localhost:3000
+# 2. Frontend (second terminal, from the repo root)
+cd apps/web
+npm install
+npm run dev                                           # http://localhost:3000, proxies /api -> :8000
 ```
 
 **It runs out of the box with zero external keys** - `PAYMENT_MODE=mock`, `LLM_MODE=mock`
 are the safe defaults in `.env.example`, so judges can clone-and-run without credentials.
-Open http://localhost:3000 and land on the Payment tab.
+Set `FRONTEND_BASE_URL=http://localhost:3000` in `apps/server/.env` so PayPal return/cancel
+redirects land back in the app after approval.
 
 ## Environment variables (apps/server/.env)
 
@@ -129,7 +206,7 @@ Open http://localhost:3000 and land on the Payment tab.
 | `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET` | - | merchant app credentials from the PayPal Developer Dashboard (Business account); required only for `PAYMENT_MODE=real` |
 | `PAYPAL_SANDBOX_API` | `https://api-m.sandbox.paypal.com` | sandbox API base |
 
-## Real Mode (评委演示用)
+## Real Mode (for judges)
 
 若需演示真实链路，按以下三步切换（`.env` 不提交到 git）：
 
@@ -178,7 +255,7 @@ Three things reviewers often ask about - here is the honest short version:
 
 | Account | Email | Role in demo |
 |---|---|---|
-| **Buyer (Personal)** | `sb-247g1r53552209@personal.example.com` | logs in at the PayPal approval page to confirm/authorize the order (credentials are shown in the Payment tab banner - sandbox only, no real money) |
+| **Buyer (Personal)** | `sb-247g1r53552209@personal.example.com` | logs in at the PayPal approval page to confirm/authorize the order (sandbox only, no real money) |
 | **Merchant (Business)** | `sb-rw2kp53552213@business.example.com` | used in the PayPal Developer Dashboard to create the app and obtain `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET` |
 
 These are PayPal **sandbox test accounts** - no real funds are involved. Credentials for the
@@ -189,13 +266,16 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest tests/test_payment_subgraph_integration.py tests/test_payment_http_api.py -q
+python -m pytest -q        # 132 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
 need_approval), the HITL interrupt gate, approve / reject / modify end-to-end flows
 (create -> capture -> explain -> trust write-back), mock vs real payment clients, HTTP API
-serialization, and capture-failure hardening. ~630 tests total in the repo.
+serialization, capture-failure hardening, plan-snapshot staleness, A/B comparison criteria +
+Pareto verdicts, Channel3 retrieval memory, and restart persistence
+(`tests/test_restart_persistence.py`: orders + audit timeline are rebuilt from JSONL after a
+cold start).
 
 ## License
 

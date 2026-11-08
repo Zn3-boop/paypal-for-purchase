@@ -8,6 +8,7 @@ import { Footer } from './components/Footer'
 import { ToastProvider } from './components/ToastProvider'
 import { PaymentResult } from './components/PaymentResult'
 import { AgentComposer } from './components/AgentComposer'
+import { SearchMemoryBar } from './components/SearchMemoryBar'
 import { usePaymentAgent } from './hooks/usePaymentAgent'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ensureSession, selectPlan, submitIntent } from './api'
@@ -118,6 +119,7 @@ function AppShell() {
           lastQuery={intentQuery}
           lastMode={intentMode}
         />
+        <SearchMemoryBar sessionId={sessionId} onPick={handleComposerSubmit} refreshKey={planRefreshKey} />
 
         {!sessionReady ? (
           <div style={{ padding: 24, textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>

@@ -184,5 +184,11 @@ apps/server/app/services/nutrition/
 # Nutrition feature data table (only consumed by the excluded nutrition service)
 apps/server/app/data/usda_foods.json
 
+# Internal engineering notes / recording scripts: kept locally, not part of the submission.
+# (They contain rehearsal-specific example numbers and must not be read as app defaults.)
+docs/EXECUTION_CHECKLIST.md
+scripts/demo_seed_script.md
+scripts/calc_demo_numbers.py
+
 # Generated server frontend bundle
 apps/server/static/

@@ -143,6 +143,19 @@ async def submit_intent(session_id: str = Query(...), req: IntentRequest | None 
     except Exception:
         logger.debug("intent audit failed", exc_info=True)
 
+    # 检索记忆：只记「用户搜过这句话」这一事实，供下次一键再搜（不参与本次检索）。
+    try:
+        from app.services.group_purchase.search_memory import record_search
+
+        record_search(
+            session_id=session_id,
+            user_id=session.user_id or "demo-user",
+            query=text,
+            mode=session.intent_mode,
+        )
+    except Exception:
+        logger.debug("search memory record failed", exc_info=True)
+
     return {
         "ok": True,
         "query": text,

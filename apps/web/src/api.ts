@@ -329,6 +329,38 @@ export interface PlansComparison {
   budget_limit?: number
   recommendation?: string
   upgrades?: { item?: string; category?: string; from?: number; to?: number; delta?: number }[]
+  /** 「凭什么这样比」：同一候选池 + 双目标（最低总价 / 最高关键词匹配分）。 */
+  criteria?: ComparisonCriteria
+  metrics?: ComparisonMetrics
+  pareto?: ComparisonPareto
+}
+
+export interface ComparisonCriteria {
+  domain?: string
+  objective_a?: string
+  objective_b?: string
+  same_feasibility?: string
+  evidence?: string
+}
+
+export interface ComparisonMetrics {
+  total_a?: number
+  total_b?: number
+  relevance_a?: number
+  relevance_b?: number
+  item_count_a?: number
+  item_count_b?: number
+  shared_count?: number
+}
+
+/** 帕累托判定：trade_off = 真实取舍；a/b_dominates = 另一方案被支配，必须当场说明。 */
+export interface ComparisonPareto {
+  relation?: 'trade_off' | 'a_dominates' | 'b_dominates'
+  note?: string
+  total_a?: number
+  total_b?: number
+  relevance_a?: number
+  relevance_b?: number
 }
 
 export interface PlansResponse {
@@ -360,6 +392,39 @@ export interface IntentResponse {
   removed_ids?: string[]
   constraints_count?: number
   message?: string
+}
+
+/** Channel3 检索记忆：去重后的最近检索原句（count = 同一句被搜过几次）。 */
+export interface SearchMemoryEntry {
+  ts?: string
+  session_id?: string
+  user_id?: string
+  query: string
+  mode?: 'single' | 'group'
+  count?: number
+}
+
+/** 选择记忆：最近选过的方案（含总额 / 件数 / 当时的检索原句）。 */
+export interface SelectionMemoryEntry {
+  ts?: string
+  session_id?: string
+  plan_id?: 'A' | 'B'
+  total?: number
+  item_count?: number
+  items?: string[]
+  query?: string
+}
+
+export interface SearchMemoryResponse {
+  recent_searches: SearchMemoryEntry[]
+  recent_selections: SelectionMemoryEntry[]
+}
+
+/** 只读的团队级检索记忆（本地演示无多租户隔离）。失败不抛给 UI 主流程。 */
+export async function fetchSearchMemory(limit = 8): Promise<SearchMemoryResponse> {
+  const resp = await fetch(`${API_BASE}/search-memory?limit=${limit}`)
+  if (!resp.ok) throw new Error(`search-memory failed: ${resp.status}`)
+  return resp.json()
 }
 
 export async function submitIntent(sessionId: string, message: string): Promise<IntentResponse> {

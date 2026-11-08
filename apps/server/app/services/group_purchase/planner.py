@@ -710,6 +710,50 @@ def _generate_risks(strategy_name: str, total: float, budget_limit: float | None
     return risks
 
 
+def _relevance_sum(items: list[dict[str, Any]]) -> float:
+    """方案的关键词匹配总分（Channel3 match_score 求和；本地目录为 0）。"""
+    return round(sum(float(it.get("match_score") or 0) for it in items), 2)
+
+
+def _pareto_relation(plan_a: dict, plan_b: dict) -> dict[str, Any]:
+    """用两个**可核对**的目标函数判断 A/B 是否互不占优。
+
+    目标 1：总价越低越好；目标 2：Channel3 关键词匹配总分越高越好。
+      - A 更便宜 且 B 匹配分更高 → 两者都在帕累托前沿上，是真实偏好取舍；
+      - 一方在两个维度都不劣 → 另一方属于被支配方案，必须当场说明，不能假装是取舍。
+    """
+    total_a = float(plan_a.get("total") or 0)
+    total_b = float(plan_b.get("total") or 0)
+    rel_a = _relevance_sum(plan_a.get("items") or [])
+    rel_b = _relevance_sum(plan_b.get("items") or [])
+
+    a_dominates = (
+        total_a <= total_b and rel_a >= rel_b and (total_a < total_b or rel_a > rel_b)
+    )
+    b_dominates = (
+        total_b <= total_a and rel_b >= rel_a and (total_b < total_a or rel_b > rel_a)
+    )
+
+    if a_dominates or b_dominates:
+        winner = "A" if a_dominates else "B"
+        return {
+            "relation": "a_dominates" if a_dominates else "b_dominates",
+            "note": f"方案 {winner} 在总价与匹配分上同时不劣，另一方案被支配，建议直接选 {winner}",
+            "total_a": round(total_a, 2),
+            "total_b": round(total_b, 2),
+            "relevance_a": rel_a,
+            "relevance_b": rel_b,
+        }
+    return {
+        "relation": "trade_off",
+        "note": "两方案互不占优（A 更便宜 / B 匹配分更高），属于真实取舍，不是谁更差",
+        "total_a": round(total_a, 2),
+        "total_b": round(total_b, 2),
+        "relevance_a": rel_a,
+        "relevance_b": rel_b,
+    }
+
+
 def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> dict:
     """比较两个方案的差异。
 
@@ -720,6 +764,7 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
     items_b = plan_b.get("items", [])
     ids_b = {it.get("id") for it in items_b}
     shared = [it for it in items_a if it.get("id") in ids_b]
+    pareto = _pareto_relation(plan_a, plan_b)
     # 逐件升级：B 是 A 的「同品类升级」底座（_upgrade_basis_items 保证 slot 一一对应）。
     # 因此按槽位 zip 归因价差，而不是按 id 配对——同一件商品（同 id）不是升级，
     # 否则会出现 "一次性塑料袋 1.5→1.5 +0.00" 这种无意义条目。
@@ -748,6 +793,24 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
         "only_b_count": len(items_b) - len(shared),
         "upgrades": upgrades,
         "budget_limit": budget_limit,
+        # 对比标准：把「凭什么这样比」写进响应，评委可以逐条核对，而不是相信文案。
+        "criteria": {
+            "domain": "同一候选池：硬约束先过滤，A/B 从同一批商品里选",
+            "objective_a": "在预算上限内最小化总价（低价优先）",
+            "objective_b": "在预算上限内最大化 Channel3 关键词匹配总分（匹配优先）",
+            "same_feasibility": "两方案使用同一 min/max 件数与同一预算上限",
+            "evidence": "匹配分 = 标题/标签与检索词的词面重合（match_score / match_tags），不含评分或评论",
+        },
+        "metrics": {
+            "total_a": pareto["total_a"],
+            "total_b": pareto["total_b"],
+            "relevance_a": pareto["relevance_a"],
+            "relevance_b": pareto["relevance_b"],
+            "item_count_a": len(items_a),
+            "item_count_b": len(items_b),
+            "shared_count": len(shared),
+        },
+        "pareto": pareto,
         "recommendation": (
             "建议方案 A（低价优先），适合预算敏感场景"
             if plan_a["total"] <= (budget_limit or float("inf")) * 0.9

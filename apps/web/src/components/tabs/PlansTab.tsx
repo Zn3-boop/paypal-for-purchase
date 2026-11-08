@@ -411,6 +411,29 @@ function DiffView({ planA, planB, comparison }: {
             )}
           </div>
 
+          {/* 对比标准（可复核）：把「凭什么这样比」写进 UI，而不是只给结论。
+              同一候选池 + 两个目标函数（最低总价 / 最高关键词匹配分）+ 帕累托判定。 */}
+          {comparison?.criteria && (
+            <div style={{ marginTop: 8, fontSize: 10, color: '#9CA3AF', background: '#0b1220', borderRadius: 6, padding: 6, lineHeight: 1.55 }}>
+              <div style={{ color: '#93C5FD', fontWeight: 700, marginBottom: 2 }}>📐 对比标准（可复核）</div>
+              <div>{comparison.criteria.domain}</div>
+              <div>A：{comparison.criteria.objective_a}　·　B：{comparison.criteria.objective_b}</div>
+              <div style={{ color: '#6B7280' }}>
+                {comparison.criteria.same_feasibility}　·　{comparison.criteria.evidence}
+              </div>
+            </div>
+          )}
+          {comparison?.pareto?.note && (
+            <div style={{ marginTop: 6, fontSize: 10, color: comparison.pareto.relation === 'trade_off' ? '#FCD34D' : '#F87171' }}>
+              {comparison.pareto.relation === 'trade_off' ? '⚖️' : '⚠️'} {comparison.pareto.note}
+              {typeof comparison.metrics?.relevance_a === 'number' && (
+                <span style={{ color: '#6B7280' }}>
+                  {' '}（匹配分 A {comparison.metrics.relevance_a} / B {comparison.metrics.relevance_b}）
+                </span>
+              )}
+            </div>
+          )}
+
           {/* 逐件升级：B 的每一件都是 A 同品类里更贵/更好的选择，价差可逐件归因、
               也可以否决（说明 B 只贵在"这几件"上，不是整体乱配） */}
           {upgrades.length > 0 && (

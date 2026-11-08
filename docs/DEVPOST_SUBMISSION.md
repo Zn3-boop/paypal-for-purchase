@@ -52,10 +52,26 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
 5. **Read-only natural-language order query.** `POST /orders/query` takes only free text;
    `session_id` is injected server-side, a foreign `ord_xxx` is answered "not found" without
    leaking existence, and the query never mutates the state machine.
+6. **The A/B comparison states its own rules and is checkable.** Both plans come from the *same
+   candidate pool* (hard constraints applied first, same budget cap, same min/max item count) and
+   differ only in objective: A minimizes total price, B maximizes the Channel3 keyword-match score
+   sum. The API returns the contract in `comparison.criteria`, the raw numbers in
+   `comparison.metrics`, and a **Pareto verdict** in `comparison.pareto` — when one plan is no worse
+   on both axes it is reported as *dominated*, not dressed up as a trade-off. The UI prints the same
+   lines, so nothing on screen is unsupported by the response.
+7. **Channel3 retrieval memory without fake personalization.** Submitted requests and plan
+   selections are appended to JSONL and surfaced as a 🧠 检索记忆 row (deduplicated queries +
+   last selected plan). Clicking an entry re-runs that exact sentence; history is never merged into
+   the current Channel3 query, because pretending last week's taste is this week's intent would be
+   fabricated relevance.
 
 ## 3-minute demo path
 
-1. Add constraints: 「总预算不超过 600 美元」 + 「不要塑料」 → dual plans render.
+1. Type **your own** request in natural language — nothing is preset: the app starts with no
+   constraints and no plans. For example:
+   「社团采购：预算不超过 <你填的金额> 美元，不要 <你不想要的材质>，给户外活动用」 → the sentence's own
+   budget/taboo are extracted into the dashboard, and dual plans render with real trade-off numbers
+   derived from that input.
 2. Delete a constraint in natural language: 「把预算约束删掉」 → plan content changes on replan
    (audit shows `constraint_changed/removed`).
 3. Modify the cart in natural language, open the confirmation modal → split preview per person.
@@ -75,9 +91,10 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
 - `create_order` double-click → same PayPal token/approval URL, gateway called once.
 - Order archive/query probes: `session_id` required (422), cross-session access 403, foreign
   order id answered without leaking, polling stops once no order is `paying`.
-- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **124 passed**
+- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **132 passed**
   (`tests/test_restart_persistence.py` covers restart recovery of the order archive and the audit
-  timeline).
+  timeline; `tests/test_comparison_criteria.py` pins the A/B criteria + Pareto verdict;
+  `tests/test_search_memory.py` covers retrieval-memory dedupe and restart survival).
 
 ## Honest limitations
 

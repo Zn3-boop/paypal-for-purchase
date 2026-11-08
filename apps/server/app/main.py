@@ -29,6 +29,7 @@ from app.api import plans, cart, constraints, orders
 from app.utils.response_cleaner import clean_fastapi_response_body
 from app.api import session as session_api
 from app.api import audit as audit_api
+from app.api import search_memory as search_memory_api
 
 # ========== Lifespan replaces the deprecated on_event("startup") ==========
 @asynccontextmanager
@@ -164,6 +165,7 @@ app.include_router(constraints.router, prefix=API_V1_PREFIX)
 app.include_router(session_api.router, prefix=API_V1_PREFIX)
 app.include_router(audit_api.router, prefix=API_V1_PREFIX)
 app.include_router(orders.router, prefix=API_V1_PREFIX)
+app.include_router(search_memory_api.router, prefix=API_V1_PREFIX)
 
 
 # ========== Static SPA hosting (apps/web built into apps/server/static) ==========
