@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   fetchPlans,
+  regeneratePlans,
   type Plan,
   type PlanItem,
   type PlansComparison,
@@ -12,6 +13,10 @@ type Props = {
   sessionId: string
   onSelectPlan: (planId: 'A' | 'B') => Promise<void>
   selectedPlanId: 'A' | 'B' | null
+  /** intent 提交后 ++，触发本 Tab 立即重拉方案（非轮询等待）。 */
+  refreshKey?: number
+  intentQuery?: string | null
+  intentMode?: 'single' | 'group' | null
 }
 
 const fmtUsd = (n: number | undefined): string => `$${(n ?? 0).toFixed(2)}`
@@ -29,42 +34,128 @@ function plansFrom(res: PlansResponse): { planA: Plan | null; planB: Plan | null
   }
 }
 
-export function PlansTab({ sessionId, onSelectPlan, selectedPlanId }: Props) {
+export function PlansTab({
+  sessionId,
+  onSelectPlan,
+  selectedPlanId,
+  refreshKey = 0,
+  intentQuery,
+  intentMode,
+}: Props) {
   const [plans, setPlans] = useState<{ planA: Plan | null; planB: Plan | null }>({ planA: null, planB: null })
   const [comparison, setComparison] = useState<PlansComparison | null>(null)
+  const [retrieval, setRetrieval] = useState<PlansResponse['retrieval']>(undefined)
+  const [serverIntent, setServerIntent] = useState<{ query: string; mode: 'single' | 'group' } | null>(null)
   const [loading, setLoading] = useState(true)
   const [showingConfirm, setShowingConfirm] = useState<'A' | 'B' | null>(null)
   const [selecting, setSelecting] = useState<'A' | 'B' | null>(null)
   const [cardError, setCardError] = useState<string | null>(null)
+  const [regenerating, setRegenerating] = useState(false)
 
-  // 初始加载 + 5s 轮询（合并进同一个 effect，逻辑不重复，组件卸载后不再写 state）
+  // 检索依据：优先用后端回显（snapshot 重放时也有），不然用刚提交的提问原文
+  const effectiveQuery = retrieval?.query || serverIntent?.query || intentQuery || ''
+  const effectiveMode = serverIntent?.mode || intentMode || null
+
+  // 初始加载 + 自适应轮询（等新方案时 1.5s，稳定后 5s）+ intent 提交后立即刷新
   useEffect(() => {
     if (!sessionId) return
     let alive = true
-    fetchPlans(sessionId)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let tries = 0
+
+    // 新检索词 = 新任务：先把上一问的卡片清掉并进入"生成中"。
+    // 否则旧方案会一直挂在屏幕上，用户看到的就是"换了问题还是旧推荐"。
+    setPlans({ planA: null, planB: null })
+    setComparison(null)
+    setRetrieval(undefined)
+    setLoading(true)
+    tries = 0
+
+    /**
+     * 落地前先校验快照是不是**本次提问**的：
+     * 提交新需求时，上一轮（带 Channel3 检索，可能几秒到几十秒）仍可能在快照失效后落盘，
+     * GET 就会把上一问的方案回放出来——表现就是"换了问题却还是旧方案，要手动刷新"。
+     * 所以查询词对不上就不落地，按 1.5s 快跑重试，新快照一到立刻替换。
+     */
+    const apply = (res: PlansResponse): boolean => {
+      const respQuery = res.retrieval?.query
+      if (intentQuery && respQuery && respQuery !== intentQuery) return false
+      setPlans(plansFrom(res))
+      setComparison(res.comparison || null)
+      setRetrieval(res.retrieval)
+      if (res.intent_query && (res.intent_mode === 'single' || res.intent_mode === 'group')) {
+        setServerIntent({ query: res.intent_query, mode: res.intent_mode })
+      }
+      return true
+    }
+
+    const pullOnce = async (): Promise<boolean> => {
+      try {
+        const res = await fetchPlans(sessionId)
+        if (!alive) return true
+        tries += 1
+        const ok = apply(res)
+        if (ok) {
+          setLoading(false)
+        } else if (tries >= 20) {
+          // 等太久就先放掉 loading（文案回到"等待生成"），但轮询继续
+          setLoading(false)
+        }
+        return ok
+      } catch {
+        // 网络抖动不算"查询词不符"，按正常节奏重试
+        tries += 1
+        if (tries >= 20) setLoading(false)
+        return true
+      }
+    }
+
+    const loop = (delay: number) => {
+      if (!alive) return
+      timer = setTimeout(() => {
+        void pullOnce().then(ok => loop(ok ? 5000 : 1500))
+      }, delay)
+    }
+    loop(0)
+
+    return () => { alive = false; if (timer) clearTimeout(timer) }
+  }, [sessionId, refreshKey, intentQuery])
+
+  /**
+   * 主动重算：约束变动不会静默改写快照（治理要求），所以给用户一个显式出口。
+   * 顺序必须是「先让后端失效快照 → 再 GET」，否则 GET 只会回放旧快照（刷新无效的根因）。
+   */
+  const onRegenerate = () => {
+    if (!sessionId || regenerating) return
+    setRegenerating(true)
+    setCardError(null)
+    regeneratePlans(sessionId)
+      .then(() => fetchPlans(sessionId))
       .then(res => {
-        if (!alive) return
         setPlans(plansFrom(res))
         setComparison(res.comparison || null)
+        setRetrieval(res.retrieval)
+        if (res.intent_query && (res.intent_mode === 'single' || res.intent_mode === 'group')) {
+          setServerIntent({ query: res.intent_query, mode: res.intent_mode })
+        }
       })
-      .catch(err => console.error('Failed to fetch plans:', err))
-      .finally(() => { if (alive) setLoading(false) })
-
-    const interval = setInterval(() => {
-      fetchPlans(sessionId)
-        .then(res => {
-          setPlans(plansFrom(res))
-          setComparison(res.comparison || null)
-        })
-        .catch(() => { /* 轮询失败静默，等下一次轮询重试 */ })
-    }, 5000)
-    return () => { alive = false; clearInterval(interval) }
-  }, [sessionId])
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : '重新生成失败'
+        // 405 几乎只发生在「后端还跑着加路由之前的老进程」：/plans/regenerate 不存在，
+        // POST 被 SPA 的 GET 兜底路由接住 → Method Not Allowed。直接说人话，别让用户干瞪眼。
+        setCardError(/Method Not Allowed/i.test(msg)
+          ? '后端还是旧代码（缺少 /plans/regenerate）。重启 uvicorn 后再点一次即可。'
+          : msg)
+      })
+      .finally(() => setRegenerating(false))
+  }
 
   if (loading && !plans.planA && !plans.planB) {
     return (
       <div style={{ padding: 24, textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>
-        正在生成购物方案...
+        {intentQuery
+          ? <>正在按「{intentQuery}」检索并生成方案…<div style={{ fontSize: 11, marginTop: 6, color: '#6B7280' }}>实时向 Channel3 检索，通常几秒；换问题会直接替换这里的内容</div></>
+          : '正在生成购物方案...'}
       </div>
     )
   }
@@ -82,11 +173,115 @@ export function PlansTab({ sessionId, onSelectPlan, selectedPlanId }: Props) {
     <div style={{ background: '#0f172a', borderRadius: 12, padding: 16, border: '1px solid #374151' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#E5E7EB' }}>🗺️ 双方案对比</h3>
-        <div style={{ fontSize: 11, color: '#9CA3AF' }}>选择任一方案后点击"确认购买"</div>
+        {selectedPlanId ? (
+          <button
+            onClick={() => setShowingConfirm(selectedPlanId)}
+            style={{ fontSize: 11, padding: '4px 10px', borderRadius: 99, border: '1px solid #10B981', background: 'transparent', color: '#6EE7B7', cursor: 'pointer', fontWeight: 700 }}
+          >
+            💳 确认并支付方案 {selectedPlanId}
+          </button>
+        ) : (
+          <div style={{ fontSize: 11, color: '#9CA3AF' }}>点「选择此方案」后在这里确认支付</div>
+        )}
       </div>
+
+      {/* 推荐依据：这是「你按哪个关键词推荐」的正面回答——
+          输入框的原文就是 Channel3 的检索词，命中数原样回显，不加工不猜测。 */}
+      {effectiveQuery && (
+        <div style={{
+          marginBottom: 10, padding: '6px 10px', borderRadius: 6,
+          background: '#0b1220', border: '1px dashed #3B82F655',
+          display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 11,
+        }}>
+          <span style={{ color: '#93C5FD', fontWeight: 700 }}>🔎 推荐依据</span>
+          <span style={{ color: '#E5E7EB' }}>关键词「{effectiveQuery}」</span>
+          {retrieval?.search_query && retrieval.search_query !== effectiveQuery && (
+            <span style={{ color: '#6B7280' }}>
+              实际检索词「{retrieval.search_query}」
+            </span>
+          )}
+          {effectiveMode && (
+            <span style={{ color: effectiveMode === 'group' ? '#FBBF24' : '#34D399' }}>
+              {effectiveMode === 'group' ? '👥 团购模式' : '🧍 单人模式'}
+            </span>
+          )}
+          {retrieval?.source && <span style={{ color: '#9CA3AF' }}>数据源 {retrieval.source}</span>}
+          {/* 三态徽标：error 是"暂时不可用"（可重试），empty 是"商品库真没匹配"，
+              两者文案与颜色都不同，避免把可恢复故障说成产品缺陷。 */}
+          {retrieval?.channel3_status === 'error' && (
+            <span style={{ color: '#F87171' }} title={retrieval?.note || ''}>
+              · 赞助商检索暂时不可用
+            </span>
+          )}
+          {retrieval?.channel3_status === 'empty' && (
+            <span style={{ color: '#FCD34D' }}>· 赞助商商品库无匹配</span>
+          )}
+          {retrieval?.channel3_status === 'disabled' && (
+            <span style={{ color: '#9CA3AF' }}>· 赞助商检索未启用</span>
+          )}
+          {typeof retrieval?.candidate_count === 'number' && (
+            <span style={{ color: '#9CA3AF' }}>
+              候选 {retrieval.candidate_count} 件 · 命中 {retrieval.matched_count ?? 0} 件
+            </span>
+          )}
+          {retrieval?.note && (
+            <span style={{ color: '#FCD34D' }}>· {retrieval.note}</span>
+          )}
+          {(effectiveQuery && typeof retrieval?.candidate_count === 'number' && retrieval.candidate_count === 0) && (
+            <span style={{ color: '#FCD34D' }}>Channel3 未命中，已回落本地目录</span>
+          )}
+          {effectiveQuery && (
+            <button
+              onClick={onRegenerate}
+              disabled={regenerating}
+              style={{ marginLeft: 'auto', fontSize: 11, background: '#1e3a8a', color: '#BFDBFE', border: '1px solid #2563EB66', borderRadius: 99, padding: '3px 12px', cursor: regenerating ? 'default' : 'pointer' }}
+              title="改完约束 / 换口味后，主动重算方案（快照不会因约束变动而静默改写）"
+            >
+              {regenerating ? '⏳ 重算中…' : '🔄 重新生成方案'}
+            </button>
+          )}
+        </div>
+      )}
 
       {cardError && (
         <div style={{ fontSize: 12, color: '#FCA5A5', marginBottom: 8 }}>⚠️ {cardError}</div>
+      )}
+
+      {/* 🤝 赞助商相关推荐：Channel3 是赞助商，但「相关」不等于「匹配」——
+          只有它真被检索命中的商品才进方案；这里展示的是"最接近但未计入方案"的那几件，
+          避免把黑胶唱片当体育用品塞进方案。 */}
+      {(retrieval?.sponsor_related?.length ?? 0) > 0 && (
+        <div style={{
+          marginBottom: 12, padding: '8px 10px', borderRadius: 8,
+          background: '#0b1220', border: '1px solid #8B5CF666',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: '#C4B5FD' }}>🤝 赞助商 Channel3 相关推荐</span>
+            <span style={{ fontSize: 10, color: '#9CA3AF' }}>
+              {retrieval?.sponsor_note || '不完全匹配本次需求，未计入方案，仅供单独参考'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 2 }}>
+            {retrieval!.sponsor_related!.map(sp => (
+              <div key={sp.id} style={{
+                flex: '0 0 150px', background: '#111827', border: '1px solid #374151',
+                borderRadius: 6, padding: 8, display: 'flex', flexDirection: 'column', gap: 4,
+              }}>
+                <div style={{ fontSize: 11, color: '#E5E7EB', fontWeight: 600, lineHeight: 1.35, maxHeight: 44, overflow: 'hidden' }}>
+                  {sp.name}
+                </div>
+                <div style={{ fontSize: 12, color: '#6EE7B7', fontWeight: 700 }}>{fmtUsd(sp.price)}</div>
+                {sp.category && <div style={{ fontSize: 9, color: '#6B7280' }}>{sp.category}</div>}
+                {(sp.tags || []).slice(0, 2).length > 0 && (
+                  <div style={{ fontSize: 9, color: '#9CA3AF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {sp.tags!.slice(0, 2).join(' · ')}
+                  </div>
+                )}
+                <div style={{ fontSize: 9, color: '#8B5CF6', marginTop: 'auto' }}>Channel3 赞助商目录</div>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Diff 视图：突出两方案差异项 */}
@@ -95,7 +290,7 @@ export function PlansTab({ sessionId, onSelectPlan, selectedPlanId }: Props) {
       )}
 
       {/* 双方案对比卡片（左右布局） */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12, alignItems: 'start' }}>
         {plans.planA && (
           <PlanCard
             plan={plans.planA}
@@ -143,6 +338,7 @@ export function PlansTab({ sessionId, onSelectPlan, selectedPlanId }: Props) {
         <SplitConfirmationModal
           key={showingConfirm}
           sessionId={sessionId}
+          mode={effectiveMode}
           plan={showingConfirm === 'A' ? plans.planA! : plans.planB!}
           onClose={() => setShowingConfirm(null)}
         />
@@ -173,6 +369,12 @@ function DiffView({ planA, planB, comparison }: {
   const { onlyA, onlyB, common } = useMemo(() => computeDiff(planA, planB), [planA, planB])
   const delta = comparison?.total_delta ?? round2((planB.total || 0) - (planA.total || 0))
   const recommendation = comparison?.recommendation
+  // 共有/专属件数以后端 comparison 为准（B 是 A 的同品类升级，共有商品必然 > 0；
+  // 前端 computeDiff 只作为旧数据兜底，避免显示 "A 8 · 共有 0 · B 8" 这种自相矛盾）
+  const sharedCount = comparison?.shared_count ?? common.length
+  const onlyACount = comparison?.only_a_count ?? onlyA.length
+  const onlyBCount = comparison?.only_b_count ?? onlyB.length
+  const upgrades = comparison?.upgrades || []
   const [open, setOpen] = useState(true)
 
   return (
@@ -183,7 +385,7 @@ function DiffView({ planA, planB, comparison }: {
       >
         ⚖️ 差异对比
         <span style={{ fontSize: 11, color: '#9CA3AF', fontWeight: 500 }}>
-          A 专属 {onlyA.length} · 共有 {common.length} · B 专属 {onlyB.length}
+          A 专属 {onlyACount} · 共有 {sharedCount} · B 专属 {onlyBCount}
         </span>
         <span style={{ color: '#6B7280' }}>{open ? '▴' : '▾'}</span>
       </button>
@@ -208,6 +410,26 @@ function DiffView({ planA, planB, comparison }: {
               </span>
             )}
           </div>
+
+          {/* 逐件升级：B 的每一件都是 A 同品类里更贵/更好的选择，价差可逐件归因、
+              也可以否决（说明 B 只贵在"这几件"上，不是整体乱配） */}
+          {upgrades.length > 0 && (
+            <div style={{ marginTop: 8, background: '#111827', borderRadius: 6, padding: 6 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#FBBF24', marginBottom: 4 }}>
+                ⬆️ 逐件升级（{upgrades.length} 项，合计 {fmtUsd(upgrades.reduce((s, u) => s + (u.delta || 0), 0))}）
+              </div>
+              {upgrades.map((u, idx) => (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: '#D1D5DB', marginBottom: 2 }}>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {u.category ? `[${u.category}] ` : ''}{u.item || '同品类升级'}
+                  </span>
+                  <span style={{ color: '#FBBF24', flexShrink: 0 }}>
+                    {fmtUsd(u.from)} → {fmtUsd(u.to)}（+{fmtUsd(u.delta)}）
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -224,8 +446,21 @@ function DiffColumn({ title, items, color }: { title: string; items: PlanItem[];
         <div style={{ fontSize: 10, color: '#4B5563', fontStyle: 'italic' }}>—</div>
       ) : (
         items.slice(0, 4).map((item, idx) => (
-          <div key={item.id || idx} style={{ fontSize: 10, color: '#D1D5DB', marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            • {item.name}
+          <div key={item.id || idx} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#D1D5DB', marginBottom: 2, overflow: 'hidden' }}>
+            {item.image_url ? (
+              <img
+                src={item.image_url}
+                alt={item.name}
+                loading="lazy"
+                style={{ width: 18, height: 18, borderRadius: 3, objectFit: 'cover', flexShrink: 0, background: '#1f2937' }}
+                onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+              />
+            ) : (
+              <span style={{ width: 18, flexShrink: 0 }} />
+            )}
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {item.name}
+            </span>
           </div>
         ))
       )}
@@ -237,7 +472,7 @@ function DiffColumn({ title, items, color }: { title: string; items: PlanItem[];
 // 单张方案卡片
 function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
   plan: Plan
-  budgetLimit: number
+  budgetLimit: number | null
   onSelect: () => void
   isSelected: boolean
   busy: boolean
@@ -245,9 +480,11 @@ function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
   const budgetCheck = plan.budget_check
   const budgetOk = plan.budget_ok ?? true
   const total = plan.total ?? 0
-  const budgetPercent = budgetLimit > 0 ? (total / budgetLimit) * 100 : 0
-  const isOver = total > budgetLimit
-  const overage = budgetCheck?.overage != null ? budgetCheck.overage : round2(total - budgetLimit)
+  // 会话没有设置硬预算时 budgetLimit 为 null：不再显示假的「预算 $600」进度条
+  const limit = budgetLimit != null && budgetLimit > 0 ? budgetLimit : null
+  const budgetPercent = limit != null ? (total / limit) * 100 : 0
+  const isOver = limit != null && total > limit
+  const overage = budgetCheck?.overage != null ? budgetCheck.overage : (limit != null ? round2(total - limit) : 0)
   const guardrailAdjusted = (plan.risks || []).some(r => r.includes('guardrail') || r.includes('自动调整'))
   const suggestions = budgetCheck?.suggestions || []
 
@@ -256,6 +493,8 @@ function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
       background: isSelected ? '#1e3a5f' : '#1e293b',
       borderRadius: 10,
       padding: 14,
+      minWidth: 0,
+      overflow: 'hidden',
       border: isSelected ? '2px solid #3B82F6' : isOver ? '1px solid #EF4444' : '1px solid #374151',
       position: 'relative',
     }}>
@@ -270,21 +509,27 @@ function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
         </div>
       </div>
 
-      {/* 预算进度条（含超支提示） */}
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#9CA3AF', marginBottom: 4 }}>
-          <span>预算 {fmtUsd(budgetLimit)}</span>
-          <span>{budgetPercent.toFixed(0)}%{isOver ? ` · 超支 ${fmtUsd(overage)}` : ''}</span>
+      {/* 预算进度条（含超支提示）；未设置预算时只显示总价，不编造预算上限 */}
+      {limit == null ? (
+        <div style={{ marginBottom: 10, fontSize: 10, color: '#6B7280' }}>
+          未设置预算上限（可在上方约束看板补充，例如「总预算 600 美元」）
         </div>
-        <div style={{ height: 6, background: '#374151', borderRadius: 3, overflow: 'hidden' }}>
-          <div style={{
-            width: `${Math.min(budgetPercent, 100)}%`,
-            height: '100%',
-            background: isOver ? '#EF4444' : budgetOk ? '#10B981' : '#F59E0B',
-            transition: 'width 0.3s ease',
-          }} />
+      ) : (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#9CA3AF', marginBottom: 4 }}>
+            <span>预算 {fmtUsd(limit)}</span>
+            <span>{budgetPercent.toFixed(0)}%{isOver ? ` · 超支 ${fmtUsd(overage)}` : ''}</span>
+          </div>
+          <div style={{ height: 6, background: '#374151', borderRadius: 3, overflow: 'hidden' }}>
+            <div style={{
+              width: `${Math.min(budgetPercent, 100)}%`,
+              height: '100%',
+              background: isOver ? '#EF4444' : budgetOk ? '#10B981' : '#F59E0B',
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Guardrail 状态黄色警示 */}
       {(guardrailAdjusted || !budgetOk) && (
@@ -302,7 +547,7 @@ function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
       {/* 权衡说明 */}
       {(plan.trade_offs && plan.trade_offs.length > 0) && (
         <div style={{ marginBottom: 8, fontSize: 10, color: '#F59E0B', background: '#1a1a0a', padding: 6, borderRadius: 4 }}>
-          ⚠️ {plan.trade_offs.slice(0, 2).map(t => t.split(':')[0]).join(' · ')}
+          ⚠️ {plan.trade_offs.slice(0, 2).join(' · ')}
         </div>
       )}
 
@@ -362,12 +607,31 @@ function ItemList({ items }: { items: PlanItem[] }) {
       {visible.map((item, idx) => (
         <div
           key={item.id || idx}
-          style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11, color: '#D1D5DB', marginBottom: 3, paddingLeft: 8, borderLeft: '2px solid #4B5563' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#D1D5DB', marginBottom: 4, paddingLeft: 8, borderLeft: '2px solid #4B5563' }}
         >
-          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {item.name}
-            {item.quantity > 1 && (
-              <span style={{ color: '#FBBF24', marginLeft: 4, fontSize: 10 }}>×{item.quantity}</span>
+          {item.image_url ? (
+            <img
+              src={item.image_url}
+              alt={item.name}
+              loading="lazy"
+              style={{ width: 26, height: 26, borderRadius: 4, objectFit: 'cover', flexShrink: 0, background: '#1f2937' }}
+              onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+            />
+          ) : (
+            <span style={{ width: 26, height: 26, borderRadius: 4, background: '#1f2937', flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#4B5563' }}>🛍️</span>
+          )}
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {item.name}
+              {item.quantity > 1 && (
+                <span style={{ color: '#FBBF24', marginLeft: 4, fontSize: 10 }}>×{item.quantity}</span>
+              )}
+            </span>
+            {(item.match_score != null || (item.tags && item.tags.length > 0)) && (
+              <span style={{ display: 'block', fontSize: 9, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.match_score != null ? `关键词匹配 ${Math.round((item.match_score || 0) * 100) / 100}` : ''}
+                {item.tags && item.tags.length > 0 ? ` · ${item.tags.slice(0, 3).join(' / ')}` : ''}
+              </span>
             )}
           </span>
           <span style={{ color: '#E5E7EB', fontWeight: 600, flexShrink: 0 }}>
@@ -388,13 +652,16 @@ function ItemList({ items }: { items: PlanItem[] }) {
 }
 
 // 二次确认弹窗（带金额的"确认下单"按钮）
-function SplitConfirmationModal({ sessionId, plan, onClose }: {
+function SplitConfirmationModal({ sessionId, plan, mode, onClose }: {
   plan: Plan
   sessionId: string
+  /** 单人模式下没有"分摊给成员"这回事：不显示每人应付/尾差。 */
+  mode?: 'single' | 'group' | null
   onClose: () => void
 }) {
   const total = plan.total ?? 0
   const itemCount = plan.items?.length || 0
+  const isGroup = mode === 'group'
   const [preview, setPreview] = useState<SplitPreviewResponse | null>(null)
   const [previewLoading, setPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
@@ -403,12 +670,22 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
   // 下单金额以**购物车**为准：预算拦截后可先改单，再在同一个弹窗里确认（服务端本来也只认购物车总价）
   const [cartTotal, setCartTotal] = useState<number>(total)
   const [cartCount, setCartCount] = useState<number>(itemCount)
-  const [editInstruction, setEditInstruction] = useState('删掉木质相框、铝制奖牌、亚麻收纳袋')
+  // 改单示例必须来自**本方案真实商品**：写死「木质相框、铝制奖牌」会让用户以为
+  // 系统在推荐别的东西（发黑胶唱片却提示删相框），这正是"跟我的提问无关"的来源。
+  const editExample = plan.items?.[0]?.name
+    ? `删掉 ${plan.items[0].name}`
+    : '把最贵的一件去掉'
+  const [editInstruction, setEditInstruction] = useState('')
   const [cartEditing, setCartEditing] = useState(false)
   const [editNote, setEditNote] = useState<string | null>(null)
   const [editError, setEditError] = useState<string | null>(null)
 
   useEffect(() => {
+    // 单人模式下没有分摊，跳过 fetch（避免单人订单里冒出"尾差由成员 E 承担"这类残留）
+    if (!isGroup) {
+      setPreviewLoading(false)
+      return
+    }
     let alive = true
     fetchSplitPreview(sessionId)
       .then(res => { if (alive) setPreview(res) })
@@ -418,7 +695,7 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
       })
       .finally(() => { if (alive) setPreviewLoading(false) })
     return () => { alive = false }
-  }, [sessionId])
+  }, [sessionId, isGroup])
 
   const handleConfirm = async () => {
     if (confirmDisabled || previewLoading) return
@@ -497,33 +774,36 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
           )}
         </div>
 
-        {/* === F2 分摊预览：弹窗打开时 fetch，loading 禁用确认按钮 === */}
-        <div style={{ marginTop: 12, marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>每人应付（按当前购物车金额均摊）：</div>
-          {previewLoading ? (
-            <div style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>正在获取分摊预览…</div>
-          ) : previewError ? (
-            <div style={{ fontSize: 12, color: '#FCA5A5', background: '#2a0d0d', padding: 6, borderRadius: 4 }}>
-              ⚠️ {previewError}
-            </div>
-          ) : preview ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {preview.splits.map((split, i) => (
-                <div key={i} style={{ fontSize: 12, color: '#E5E7EB', display: 'flex', justifyContent: 'space-between', padding: 4, background: '#374151', borderRadius: 4 }}>
-                  <span>{split.name}</span>
-                  <span style={{ fontWeight: 600, color: split.is_adjustment ? '#FCD34D' : '#10B981' }}>
-                    {fmtUsd(split.amount)}{split.is_adjustment ? ' · 尾差' : ''}
-                  </span>
-                </div>
-              ))}
-              <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4 }}>
-                总计 {fmtUsd(preview.total)} · 平均 {fmtUsd(preview.per_person)} · 尾差由 {preview.adjustment_member || '最后一位成员'} 承担
+        {/* === F2 分摊预览（仅团购）：弹窗打开时 fetch，loading 禁用确认按钮 ===
+            单人模式没有成员可分，显示「每人应付 / 尾差由成员 E 承担」纯属误导。 */}
+        {isGroup && (
+          <div style={{ marginTop: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>每人应付（按当前购物车金额均摊）：</div>
+            {previewLoading ? (
+              <div style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>正在获取分摊预览…</div>
+            ) : previewError ? (
+              <div style={{ fontSize: 12, color: '#FCA5A5', background: '#2a0d0d', padding: 6, borderRadius: 4 }}>
+                ⚠️ {previewError}
               </div>
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>暂无分摊数据</div>
-          )}
-        </div>
+            ) : preview ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {preview.splits.map((split, i) => (
+                  <div key={i} style={{ fontSize: 12, color: '#E5E7EB', display: 'flex', justifyContent: 'space-between', padding: 4, background: '#374151', borderRadius: 4 }}>
+                    <span>{split.name}</span>
+                    <span style={{ fontWeight: 600, color: split.is_adjustment ? '#FCD34D' : '#10B981' }}>
+                      {fmtUsd(split.amount)}{split.is_adjustment ? ' · 尾差' : ''}
+                    </span>
+                  </div>
+                ))}
+                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4 }}>
+                  总计 {fmtUsd(preview.total)} · 平均 {fmtUsd(preview.per_person)} · 尾差由 {preview.adjustment_member || '最后一位成员'} 承担
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>暂无分摊数据</div>
+            )}
+          </div>
+        )}
 
         {plan.budget_ok === false && (
           <div style={{ fontSize: 11, color: '#FCD34D', marginBottom: 8, background: '#1a1600', padding: 6, borderRadius: 4 }}>
@@ -555,7 +835,7 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
         {/* 购物车改单：预算拦截后可在同一弹窗里把 393 改到预算内，再点确认（Pinduoduo 式"改完直接付"） */}
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed #374151' }}>
           <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>
-            🛒 购物车改单（可选）：例如「删掉木质相框、铝制奖牌、亚麻收纳袋」
+            🛒 购物车改单（可选）：例如「{editExample}」
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <input
@@ -596,6 +876,8 @@ function SplitConfirmationModal({ sessionId, plan, onClose }: {
   )
 }
 
-function getBudgetFromPlan(plan: Plan): number {
-  return plan.budget_check?.limit ?? 600
+/** 方案卡片的预算上限：只认真实预算约束，缺失时返回 null（不要伪造 600）。 */
+function getBudgetFromPlan(plan: Plan): number | null {
+  const limit = plan.budget_check?.limit
+  return typeof limit === 'number' && limit > 0 ? limit : null
 }

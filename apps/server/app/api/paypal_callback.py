@@ -1,4 +1,4 @@
-﻿"""PayPal Callback Endpoints for G3 Complete Payment Flow.
+"""PayPal Callback Endpoints for G3 Complete Payment Flow.
 
 PayPal 沙盒流程闭环：
 1. 创建订单 -> 返回 approval_url
@@ -70,6 +70,35 @@ def _with_session(base_url: str, session_id: str) -> str:
 
 def _frontend_base() -> str:
     return (get_settings().frontend_base_url or "http://localhost:3000").rstrip("/")
+
+
+# 浏览器真实 origin（含端口）。为什么要记：dev 前端跑在 **3000**（apps/web/package.json:
+# `vite --port 3000`），只要 .env 的 FRONTEND_BASE_URL 写成别的端口（例如 5173），
+# PayPal 登录后 302 就会落到一个没人监听的端口 —— 浏览器只显示「无法打开页面」。
+# 所以回跳落地优先用「下单时浏览器打过来的 origin」，配置只是兜底。
+_FRONTEND_ORIGINS: dict[str, str] = {}
+
+
+def remember_frontend_origin(session_id: str, request: Request) -> None:
+    """记录该会话的浏览器 origin（Origin 头优先，退回 Referer）。"""
+    if not session_id:
+        return
+    origin = (request.headers.get("origin") or "").strip()
+    if not origin:
+        referer = (request.headers.get("referer") or "").strip()
+        if referer:
+            from urllib.parse import urlsplit
+
+            parts = urlsplit(referer)
+            if parts.scheme and parts.netloc:
+                origin = f"{parts.scheme}://{parts.netloc}"
+    if origin:
+        _FRONTEND_ORIGINS[session_id] = origin.rstrip("/")
+
+
+def _frontend_for(session_id: str) -> str:
+    """回跳落地地址：浏览器真实 origin > 配置的 FRONTEND_BASE_URL。"""
+    return _FRONTEND_ORIGINS.get(session_id or "") or _frontend_base()
 
 
 def _wants_html(request: Request) -> bool:
@@ -181,7 +210,9 @@ async def get_cart_total(session_id: str = Query(...)):
 
 
 @router.post("/create_order", response_model=CreateOrderResponse)
-async def create_order(req: CreateOrderRequest):
+async def create_order(req: CreateOrderRequest, request: Request):
+    # 记下浏览器真实 origin：PayPal 回跳按它落地，避免端口写错导致白页。
+    remember_frontend_origin(req.session_id, request)
     """创建 PayPal 订单并返回 approval_url（用户需在此批准）。
 
     P0 HITL 完整性修复：只使用 session 购物车计算总价，忽略前端传入的 amount。
@@ -394,14 +425,42 @@ async def paypal_callback(
     request: Request,
     token: str = Query(..., description="PayPal 返回的支付令牌"),
     PayerID: Optional[str] = Query(None, description="PayPal 买家 ID"),
-    session_id: Optional[str] = Query(None, description="ECV 会话 ID（用于审计）")
+    session_id: Optional[str] = Query(None, description="ECV 会话 ID（用于审计）"),
+    flow: Optional[str] = Query(None, description="支付业务类型：个人支付 / 团购"),
 ):
-    """PayPal 沙盒回跳回调，捕获订单并推进状态机 paying → paid。
-
-    D2 副门：captured_amount 必须等于订单金额，否则告警并回退 cancelled。
-    幂等：订单已是 paid 时直接返回成功，不重复 capture、不重复记 payment_completed。
-    """
+    """共用 PayPal 回跳入口；按创建订单时登记的业务类型分派。"""
     ctx = _PENDING_ORDERS.get(token, {})
+    if flow == "payment" or ctx.get("flow") == "payment":
+        from app.api.payment import complete_payer_return
+
+        try:
+            result = await complete_payer_return(session_id=session_id or "", token=token)
+        except Exception as exc:  # pragma: no cover - 捕获失败不应把浏览器留在 500 白页
+            # 「PayPal 登录后无法打开页面」的历史成因之一：捕获阶段抛错时 FastAPI 直接回
+            # 500 JSON/纯文本，浏览器看到的就是一堵打不开的墙。这里统一 302 回前端落地页
+            # 并带上 status=error，让用户看到可读的失败说明（前端 /payment/review 会渲染）。
+            logger.exception("agentic paypal callback failed: %s", exc)
+            if _wants_html(request):
+                query = urlencode({
+                    "tab": "shop",
+                    "session_id": session_id or "",
+                    "payment_status": "error",
+                    "reason": str(exc)[:160],
+                })
+                return RedirectResponse(f"{_frontend_for(session_id or "")}/?{query}", status_code=302)
+            raise
+        if _wants_html(request):
+            query = urlencode({
+                "tab": "orders",
+                "payment_status": result.payment.get("status", ""),
+                "paypal_token": token,
+            })
+            return RedirectResponse(f"{_frontend_for(session_id or "")}/?{query}", status_code=302)
+        return result
+
+    # 团购回跳：捕获订单并推进状态机 paying → paid。
+    # D2 副门校验捕获金额；paid 订单重复回跳不重复 capture / 审计。
+
     session_id = session_id or ctx.get("session_id") or ""
     local_order_id = ctx.get("local_order_id") or ""
 
@@ -438,7 +497,7 @@ async def paypal_callback(
             logger.info("idempotent callback: order %s already paid, skip capture", order.order_id)
             if _wants_html(request):
                 return RedirectResponse(
-                    f"{_frontend_base()}/payment/success?order_id={order.order_id}&session_id={session_id}",
+                    f"{_frontend_for(session_id or "")}/?tab=orders&order_id={order.order_id}&session_id={session_id}",
                     status_code=302,
                 )
             return {
@@ -456,7 +515,7 @@ async def paypal_callback(
             logger.info("late callback for cancelled order %s, ignore", order.order_id)
             if _wants_html(request):
                 return RedirectResponse(
-                    f"{_frontend_base()}/payment/review?session_id={session_id}&status=cancelled",
+                    f"{_frontend_for(session_id or "")}/?tab=shop&session_id={session_id}&status=cancelled",
                     status_code=302,
                 )
             return {"success": False, "order_id": order.order_id, "status": "CANCELLED", "message": "订单已取消"}
@@ -506,8 +565,8 @@ async def paypal_callback(
                 )
                 if _wants_html(request):
                     return RedirectResponse(
-                        f"{_frontend_base()}/payment/review"
-                        f"?session_id={session_id}&status=cancelled&reason=amount_mismatch",
+                        f"{_frontend_for(session_id or "")}/?tab=shop&session_id={session_id}"
+                        f"&status=cancelled&reason=amount_mismatch",
                         status_code=302,
                     )
                 return {
@@ -542,8 +601,7 @@ async def paypal_callback(
                 logger.warning("complete_payment 二次守卫异常（应已在上面拦截）: %s", msg)
 
             success_url = (
-                f"{_frontend_base()}/payment/success"
-                f"?order_id={order.order_id}"
+                f"{_frontend_for(session_id or "")}/?tab=orders&order_id={order.order_id}"
                 f"&session_id={session_id}"
                 f"&amount={captured_amount:.2f}"
                 f"&paypal_token={order_id}"
@@ -565,10 +623,26 @@ async def paypal_callback(
         else:
             raise HTTPException(status_code=400, detail="支付未完成")
 
-    except HTTPException:
+    except HTTPException as exc:
+        # 浏览器回跳（Accept: text/html）不该看到 4xx/5xx 裸页面：统一落到前端复核页，
+        # 把 detail 放进 query 供页面展示。脚本调用仍保留原始状态码。
+        if _wants_html(request):
+            query = urlencode({
+                "status": "error",
+                "session_id": session_id or "",
+                "reason": str(exc.detail)[:160],
+            })
+            return RedirectResponse(f"{_frontend_for(session_id or "")}/payment/review?{query}", status_code=302)
         raise
     except Exception as e:
         logger.error("PayPal callback failed: %s", e)
+        if _wants_html(request):
+            query = urlencode({
+                "status": "error",
+                "session_id": session_id or "",
+                "reason": str(e)[:160],
+            })
+            return RedirectResponse(f"{_frontend_for(session_id or "")}/payment/review?{query}", status_code=302)
         raise HTTPException(status_code=500, detail=f"支付处理失败：{e}")
 
 
@@ -604,8 +678,8 @@ async def paypal_cancel(
         logger.warning("paypal_cancel state machine failed: %s", exc)
 
     cancel_url = (
-        f"{_frontend_base()}/payment/review"
-        f"?session_id={session_id}&status=cancelled&token={token or ''}"
+        f"{_frontend_for(session_id or "")}/?tab=shop&session_id={session_id}"
+        f"&status=cancelled&token={token or ''}"
     )
 
     logger.info("PayPal payment cancelled: token=%s session_id=%s", token, session_id)

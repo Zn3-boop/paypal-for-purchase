@@ -176,16 +176,21 @@ def build_user_decision_evidence(
 
 
 def build_order_outcome_evidence(
-    intent: PaymentIntent, *, succeeded: bool, detail: str = ""
+    intent: PaymentIntent, *, succeeded: bool, detail: str = "", trust_relevant_failure: bool = False
 ) -> EvidenceMessage:
-    """B 级：订单完成/失败后的证据。"""
+    """B 级：订单完成/失败后的证据。
+
+    仅把「用户信任相关」的失败（用户拒绝 / 拒批 / 拒付）视为信任降级；
+    技术性捕获失败（买家未返回、intent 未命中、网关超时）是系统问题，
+    不应惩罚用户信任分。
+    """
     return EvidenceMessage(
         grade=EvidenceGrade.B,
         intent_id=intent.id,
         user_id=intent.user_id,
         claim=f"订单{'成功' if succeeded else '失败'}：{detail or intent.description}",
-        delta=TRUST_CORRECT_BONUS if succeeded else -TRUST_FAIL_PENALTY,
-        meta={"succeeded": succeeded, "detail": detail},
+        delta=TRUST_CORRECT_BONUS if succeeded else (-TRUST_FAIL_PENALTY if trust_relevant_failure else 0.0),
+        meta={"succeeded": succeeded, "detail": detail, "trust_relevant_failure": trust_relevant_failure},
     )
 
 

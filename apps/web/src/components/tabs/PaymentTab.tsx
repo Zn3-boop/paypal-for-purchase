@@ -11,7 +11,7 @@ type Props = {
   history: PaymentChatMsg[]
   setHistory: Dispatch<SetStateAction<PaymentChatMsg[]>>
   endRef: RefObject<HTMLDivElement | null>
-  doChat: () => void
+  doChat: (text?: string) => void
   decide: (decision: 'approve' | 'reject' | 'modify') => void
   pending: PaymentAgentResponse | null
   loading: boolean
@@ -21,6 +21,15 @@ type Props = {
   setGoalText: (v: string) => void
   setGoal: () => void
   goalSaving: boolean
+  /**
+   * 嵌入式模式：当「对话与支付」被合并到选购单页时使用。
+   * 隐藏面向评委的沙盒账号条 / 授权边界讲解 / 储蓄目标等独立页专属内容，
+   * 并把历史对话折叠起来——否则用户会先看到几天前失败的旧推荐
+   * （「处理完成。」「Music!」），误以为那就是本次方案的结果。
+   */
+  embedded?: boolean
+  /** 嵌入式模式下用来把「已选哪个方案」写进支付指令（方案 A/B）。 */
+  selectedPlanId?: 'A' | 'B' | null
 }
 
 /** Helper: format a currency amount. */
@@ -89,6 +98,7 @@ function ApprovalCard({ res, onApprove, onReject, busy }: {
         </div>
         <div style={{ textAlign: 'right', fontSize: 12, color: '#9CA3AF' }}>
           <div>信任分 {auth?.trust_score ?? '-'}</div>
+          <div>自动授权上限 {auth?.auto_threshold ?? '-'} USD</div>
           <div>风险 {auth?.risk_level || '-'}</div>
         </div>
       </div>
@@ -152,6 +162,10 @@ export function PaymentTab(props: Props) {
     chatMsg, setChatMsg, history, endRef, doChat, decide, pending, loading, onClear,
     goals, goalText, setGoalText, setGoal, goalSaving,
   } = props
+  const embedded = props.embedded === true
+  // 嵌入选购页时默认不展示历史：旧会话里可能残留几天前的失败推荐。
+  const [showHistory, setShowHistory] = useState(!embedded)
+  const visibleHistory = showHistory ? history : []
   const {
     supported: micSupported, listening: micListening, transcribing: micTranscribing,
     engine: micEngine, error: micError, toggle: toggleMic,
@@ -179,63 +193,94 @@ export function PaymentTab(props: Props) {
 
   return (
     <section>
-      {/* 契约 11.7：sandbox 测试账号常驻提示条（评委打开 demo 的第一眼） */}
-      <SandboxNotice />
-      {/* 契约 K5：常驻徽章，告知评委当前 PayPal 链路为沙箱环境 */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', borderRadius: 6, padding: '2px 8px', background: '#1f2937', color: '#fbbf24', border: '1px solid #fbbf24' }}>PayPal Sandbox</span>
-      </div>
-
-      {/* Intro card */}
-      <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #FF6B3544', background: '#1a1008' }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: '#FF6B35' }}>⚡ 授权边界演示 — Agentic Payment</div>
-        <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 4 }}>
-          说一句话让代理为你下单，它在授权边界内自动判断是否需要你确认。
-          信任分会随你每次批准而上升——新用户每笔需确认，高信任后小额自动放行。
-        </div>
-        <div style={{ fontSize: 11, color: '#FCD34D', marginTop: 6, lineHeight: 1.5 }}>
-          💡 这里擅长「买<strong>一件</strong>东西」（例：一张周五的爵士唱片）。多件 / 多人拼单请到
-          「📊 方案对比」：约束 → 生成方案 → 确认下单 → 一键跳转 PayPal 支付。
-        </div>
-
-      </div>
-
-      {/* 储蓄目标（P1 演示入口）：先立目标，后买享受型消费会被拦截审批 */}
-      <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #34D39944', background: '#081811' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: '#60A5FA', flexShrink: 0 }}>🎯 储蓄目标</span>
-          <input
-            value={goalText}
-            onChange={e => setGoalText(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !goalSaving && setGoal()}
-            placeholder="如：我要存钱买相机"
-            style={{ ...sx.input, flex: 1, fontSize: 12, padding: '6px 10px' }}
-          />
-          <button onClick={setGoal} disabled={goalSaving || !goalText.trim()} style={{ ...sx.btnSecondary, background: '#059669', color: '#fff', fontSize: 12, padding: '6px 12px', flexShrink: 0 }}>{goalSaving ? '…' : '设置'}</button>
-        </div>
-        {goals && goals.length > 0 && (
-          <div style={{ marginTop: 8, fontSize: 11, color: '#A7F3D0' }}>
-            {goals.filter(Boolean).map((g, i) => (
-              <div key={i} style={{ padding: '2px 0' }}>
-                目标：{g?.target_label}{g && g.target_amount > 0 ? ` · 储蓄 ${g.target_amount}` : ''} · 月度护栏 {g?.monthly_spend_cap ?? '-'}
-              </div>
-            ))}
-            <div style={{ marginTop: 4, opacity: 0.75 }}>
-              💡 试试输入想买的需求，代理会为你创建订单并等待批准
-            </div>
+      {/* 独立页讲解（沙盒账号 / 授权边界演示）：嵌入式选购页里已是噪声，隐藏 */}
+      {!embedded && (
+        <>
+          {/* 契约 11.7：sandbox 测试账号常驻提示条（评委打开 demo 的第一眼） */}
+          <SandboxNotice />
+          {/* 契约 K5：常驻徽章，告知评委当前 PayPal 链路为沙箱环境 */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', borderRadius: 6, padding: '2px 8px', background: '#1f2937', color: '#fbbf24', border: '1px solid #fbbf24' }}>PayPal Sandbox</span>
           </div>
-        )}
-      </div>
+
+          {/* Intro card */}
+          <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #FF6B3544', background: '#1a1008' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#FF6B35' }}>⚡ 授权边界演示 — Agentic Payment</div>
+            <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 4 }}>
+              说一句话让代理为你下单，它在授权边界内自动判断是否需要你确认。
+              信任分会随你每次批准而上升——新用户每笔需确认，高信任后小额自动放行。
+            </div>
+            <div style={{ fontSize: 11, color: '#FCD34D', marginTop: 6, lineHeight: 1.5 }}>
+              💡 这里擅长「买<strong>一件</strong>东西」（例：一张周五的爵士唱片）。多件 / 多人拼单请到
+              「📊 方案对比」：约束 → 生成方案 → 确认下单 → 一键跳转 PayPal 支付。
+            </div>
+
+          </div>
+
+          {/* 储蓄目标（P1 演示入口）：先立目标，后买享受型消费会被拦截审批 */}
+          <div style={{ ...sx.card, marginBottom: 16, border: '1px solid #34D39944', background: '#081811' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#60A5FA', flexShrink: 0 }}>🎯 储蓄目标</span>
+              <input
+                value={goalText}
+                onChange={e => setGoalText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !goalSaving && setGoal()}
+                placeholder="如：我要存钱买相机"
+                style={{ ...sx.input, flex: 1, fontSize: 12, padding: '6px 10px' }}
+              />
+              <button onClick={setGoal} disabled={goalSaving || !goalText.trim()} style={{ ...sx.btnSecondary, background: '#059669', color: '#fff', fontSize: 12, padding: '6px 12px', flexShrink: 0 }}>{goalSaving ? '…' : '设置'}</button>
+            </div>
+            {goals && goals.length > 0 && (
+              <div style={{ marginTop: 8, fontSize: 11, color: '#A7F3D0' }}>
+                {goals.filter(Boolean).map((g, i) => (
+                  <div key={i} style={{ padding: '2px 0' }}>
+                    目标：{g?.target_label}{g && g.target_amount > 0 ? ` · 储蓄 ${g.target_amount}` : ''} · 月度护栏 {g?.monthly_spend_cap ?? '-'}
+                  </div>
+                ))}
+                <div style={{ marginTop: 4, opacity: 0.75 }}>
+                  💡 试试输入想买的需求，代理会为你创建订单并等待批准
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Transcript */}
       <div style={{ ...sx.card, marginBottom: 16 }}>
-        {history.length === 0 && (
-          <div style={{ fontSize: 12, color: '#6B7280', padding: 12 }}>
-            试着输入：<b>帮我买一张周五晚上听的爵士唱片</b>
-            <span style={{ color: '#4B5563' }}>（一次只买一件；多件拼单请去「📊 方案对比」）</span>
+        {embedded && history.length > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <button
+              onClick={() => setShowHistory(v => !v)}
+              style={{ fontSize: 11, color: '#9CA3AF', background: 'none', border: '1px solid #374151', borderRadius: 99, padding: '3px 10px', cursor: 'pointer' }}
+            >
+              {showHistory ? '▾ 收起历史对话' : `📜 历史对话（${history.length} 条，点击展开）`}
+            </button>
+            <button
+              onClick={onClear}
+              disabled={loading}
+              title="清空全部历史（含旧会话的错误推荐）"
+              style={{ fontSize: 10, color: '#F87171', background: 'none', border: '1px solid #7f1d1d', borderRadius: 99, padding: '3px 10px', cursor: loading ? 'default' : 'pointer' }}
+            >
+              清空历史
+            </button>
           </div>
         )}
-        {history.map(m => {
+        {visibleHistory.length === 0 && (
+          <div style={{ fontSize: 12, color: '#6B7280', padding: 12 }}>
+            {embedded ? (
+              <span>
+                选中上方方案的「选择此方案」后，在这里确认这笔支付即可，无需切换页面。
+              </span>
+            ) : (
+              <span>
+                试着输入：<b>帮我买一张周五晚上听的爵士唱片</b>
+                <span style={{ color: '#4B5563' }}>（一次只买一件；多件拼单请去「📊 方案对比」）</span>
+              </span>
+            )}
+          </div>
+        )}
+        {visibleHistory.map(m => {
           if (m.role === 'user') {
             return (
               <div key={m.id} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
@@ -275,6 +320,22 @@ export function PaymentTab(props: Props) {
                   {m.res.payment?.status === 'captured' && !ok && (
                     <div style={{ marginTop: 4, fontSize: 11, color: '#34D399' }}>✓ 订单已成功捕获扣款</div>
                   )}
+                  {/* 批准后拿到 approval_url 才有 PayPal 跳转；单件代理不会自动替你点批准 */}
+                  {m.res.payment?.approval_url && (
+                    <div style={{ marginTop: 8 }}>
+                      <a
+                        href={m.res.payment.approval_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ display: 'inline-block', padding: '8px 12px', borderRadius: 8, background: '#0070BA', color: '#fff', fontWeight: 700, fontSize: 12, textDecoration: 'none' }}
+                      >
+                        💳 去 PayPal 批准这笔订单 →
+                      </a>
+                      <div style={{ marginTop: 4, fontSize: 10, color: '#9CA3AF' }}>
+                        沙盒环境：先在 PayPal 侧批准；本页的捕获结果只在 PAYMENT_MODE=mock 时即时完成。
+                      </div>
+                    </div>
+                  )}
                   {m.res.evidence && m.res.evidence.length > 0 && <EvidenceBlock groups={m.res.evidence} />}
                 </div>
               </div>
@@ -309,25 +370,53 @@ export function PaymentTab(props: Props) {
         </div>
       )}
 
-      {/* Input */}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <input value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && !loading && doChat()} placeholder="例如：帮我买一张周五晚上听的爵士唱片" style={{ ...sx.input, flex: 1 }} />
-        {micSupported && (
-          <button onClick={toggleMic} disabled={micTranscribing} title={micTranscribing ? 'Transcribing…' : (micListening ? 'Stop and transcribe' : 'Speak to the payment agent')} style={{ width: 44, border: 'none', borderRadius: 10, cursor: micTranscribing ? 'default' : 'pointer', fontSize: 18, background: micListening ? '#3B82F6' : '#1F2937', color: micListening ? '#fff' : '#E5E7EB', opacity: micTranscribing ? 0.6 : 1, flexShrink: 0 }}>
-            {micTranscribing ? '…' : micListening ? '⏹' : '🎤'}
+      {/* Input —— 仅独立页保留。
+          嵌入选购页时，页面顶部已经有唯一一个「统一采购搜索框」，这里再来一个
+          🎤/Send 只会让人不知道该往哪打字（重复输入框，视频里会拍到的真 bug）。
+          嵌入式只保留「确认/批准支付」这类动作按钮（ApprovalCard 在上方）。 */}
+      {embedded && (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => doChat(`确认购买${props.selectedPlanId ? `方案 ${props.selectedPlanId} ` : '已选方案'}里的商品，就地支付`)}
+            disabled={loading}
+            style={{
+              ...sx.btnSecondary,
+              background: loading ? '#1E3A5F' : '#3B82F6',
+              color: '#fff', fontWeight: 700, fontSize: 13, padding: '9px 16px',
+              cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.7 : 1,
+            }}
+          >
+            {loading ? '代理处理中…' : '🤖 让代理确认这笔支付'}
           </button>
-        )}
-        <button onClick={doChat} disabled={loading} style={{ ...sx.btnSecondary, background: '#3B82F6', color: '#fff' }}>{loading ? '…' : 'Send'}</button>
-        {history.length > 0 && (
-          <button onClick={onClear} disabled={loading} style={{ ...sx.btnSecondary, background: 'transparent', color: '#9CA3AF', border: '1px solid #374151' }}>Clear</button>
-        )}
-      </div>
-      {micListening && <div style={{ fontSize: 11, color: '#93C5FD', marginTop: 8 }}>{micEngine === 'whisper' ? 'Listening… speak, then tap stop (local transcription).' : 'Listening…'}</div>}
-      {micError && <div style={{ fontSize: 11, color: '#F87171', marginTop: 8 }}>{micError}</div>}
-      {!micSupported && (
-        <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 8 }}>
-          🎤 Voice input unavailable — start the local server, or type instead.
+          <span style={{ fontSize: 11, color: '#6B7280', flex: '1 1 240px' }}>
+            文字入口只有页面顶部那一个搜索框；这里只保留「确认支付」动作。
+            选中方案后点它，代理按方案内的商品下单；是否需要你二次批准由授权边界决定。
+          </span>
         </div>
+      )}
+
+      {!embedded && (
+        <>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && !loading && doChat()} placeholder="例如：帮我买一张周五晚上听的爵士唱片" style={{ ...sx.input, flex: 1 }} />
+            {micSupported && (
+              <button onClick={toggleMic} disabled={micTranscribing} title={micTranscribing ? 'Transcribing…' : (micListening ? 'Stop and transcribe' : 'Speak to the payment agent')} style={{ width: 44, border: 'none', borderRadius: 10, cursor: micTranscribing ? 'default' : 'pointer', fontSize: 18, background: micListening ? '#3B82F6' : '#1F2937', color: micListening ? '#fff' : '#E5E7EB', opacity: micTranscribing ? 0.6 : 1, flexShrink: 0 }}>
+                {micTranscribing ? '…' : micListening ? '⏹' : '🎤'}
+              </button>
+            )}
+            <button onClick={() => doChat()} disabled={loading} style={{ ...sx.btnSecondary, background: '#3B82F6', color: '#fff' }}>{loading ? '…' : 'Send'}</button>
+            {history.length > 0 && (
+              <button onClick={onClear} disabled={loading} style={{ ...sx.btnSecondary, background: 'transparent', color: '#9CA3AF', border: '1px solid #374151' }}>Clear</button>
+            )}
+          </div>
+          {micListening && <div style={{ fontSize: 11, color: '#93C5FD', marginTop: 8 }}>{micEngine === 'whisper' ? 'Listening… speak, then tap stop (local transcription).' : 'Listening…'}</div>}
+          {micError && <div style={{ fontSize: 11, color: '#F87171', marginTop: 8 }}>{micError}</div>}
+          {!micSupported && (
+            <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 8 }}>
+              🎤 Voice input unavailable — start the local server, or type instead.
+            </div>
+          )}
+        </>
       )}
     </section>
   )

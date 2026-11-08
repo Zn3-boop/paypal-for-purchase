@@ -61,8 +61,28 @@ export function usePaymentAgent({ setLoading, setError }: Busy) {
   const push = useCallback((m: PaymentChatMsg) => setHistory(h => [...h, m]), [])
   const pushAgent = useCallback((res: PaymentAgentResponse) => push({ id: crypto.randomUUID(), role: 'agent', text: '', res }), [push])
 
-  const doChat = useCallback(async () => {
-    const text = chatMsg.trim()
+  // PayPal 整页回跳后恢复支付对话上下文；仅展示后端回调返回的状态。
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const status = params.get('payment_status')
+    if (!status) return
+    push({
+      id: crypto.randomUUID(),
+      role: 'system',
+      text: status === 'captured'
+        ? '✅ PayPal 买家已批准，订单捕获成功。'
+        : `⚠️ PayPal 已返回，但支付未完成（${status || '未知状态'}）。`,
+    })
+    params.delete('payment_status')
+    params.delete('paypal_token')
+    params.set('tab', 'chat')
+    window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
+  }, [push])
+
+  const doChat = useCallback(async (overrideText?: string) => {
+    // overrideText：嵌入式「确认支付」按钮用一句话直接发起，不依赖顶部输入框
+    // （单页只有一个文字入口，支付区不再重复放 🎤/Send）。
+    const text = (overrideText ?? chatMsg).trim()
     if (!text) return
     setChatMsg(''); setError('')
     setLoading(true)
@@ -71,6 +91,9 @@ export function usePaymentAgent({ setLoading, setError }: Busy) {
       const res = await paymentAgentChat({ message: text, sessionId })
       pushAgent(res)
       setPending(res.needs_approval ? res : null)
+      if (res.payment?.status === 'created' && res.payment.approval_url) {
+        window.location.assign(res.payment.approval_url)
+      }
     } catch (e) { setError(String(e)) }
     setLoading(false)
   }, [chatMsg, setLoading, setError, push, pushAgent, sessionId])
@@ -83,7 +106,13 @@ export function usePaymentAgent({ setLoading, setError }: Busy) {
       const res = await paymentApprove({ sessionId, userId: 'demo-user', decision })
       pushAgent(res)
       setPending(null)
-      toast(decision === 'approve' ? '✅ 已批准' : decision === 'reject' ? '❌ 已否决' : '✏️ 已修改后放行', 'success')
+      if (res.payment?.capture_id) {
+        toast(decision === 'approve' ? '✅ 支付完成' : decision === 'reject' ? '❌ 订单已取消' : '📝 修改后放行', 'success')
+      } else if (res.payment?.approval_url) {
+        window.location.assign(res.payment.approval_url)
+      } else {
+        toast(decision === 'approve' ? '✅ 已批准' : decision === 'reject' ? '❌ 已否决' : '✏️ 已修改后放行', 'success')
+      }
     } catch (e) {
       setError(String(e))
       toast(`审批提交失败: ${String(e)}`, 'error')

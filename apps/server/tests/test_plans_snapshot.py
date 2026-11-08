@@ -83,9 +83,16 @@ def test_repeated_get_plans_replays_snapshot_and_logs_once(client):
 
 
 def test_plans_snapshot_keeps_budget_gate_alive(client):
-    """主线缩影：600 生成 → 加 350 → 回放仍 B=393 → 选 B → 400 budget_violated。
+    """主线缩影：生成 → 预算收紧到低于 B → 回放仍是同一份 B → 选 B → 400 budget_violated。
 
     这是整场事故的疫苗测试：只要它存在，这类问题永远不会再从探针层漏到点击层。
+
+    注意：这里断言的是**治理属性**（快照不重算 / B 超新预算 / overage = B − 新预算），
+    而不是把 B 或收紧值钉死成具体金额。B 的金额取决于候选目录与匹配打分，方案策略
+    本身是可演进的（"耐用优先"→"匹配优先"）；钉死 393 会让策略改进变成假回归，
+    而真正的契约——「约束收紧不得静默改写用户正在看的方案」——用"回放载荷逐字节相同"
+    来证明反而更严格。同理，收紧值必须由 B 反推（低于 B 即可），否则目录一变
+    （实测 B=107）预算门就永远不会触发，测试反而失去意义。
     """
     sid = _sid("snapshot-gate")
     _reset(client, sid, hard=True)
@@ -100,36 +107,40 @@ def test_plans_snapshot_keeps_budget_gate_alive(client):
 
     payload = _plans(client, sid)
     plan_b_snapshot = next(p for p in payload["plans"] if p["plan_id"] == "B")
-    assert _plan_total(payload, "B") == 393.0, "计划基线必须是 B=393.0（剧本锚点）"
+    b_total = _plan_total(payload, "B")
+    assert 0 < b_total <= 600.0, f"剧本基线要求 0 < B <= 600，实际 B={b_total}"
     assert _plan_generated_count(client, sid) == 1
 
-    # 预算收紧到 350：约束进入面板，但方案不动（治理叙事核心）
+    # 收紧到「明显低于 B」的预算：门是否会被触发由数据决定，但必须能触发
+    tightened = round(b_total - max(1.0, round(b_total * 0.15, 2)), 2)
+    assert 0 < tightened < b_total, f"收紧值必须严格低于 B：tightened={tightened}, B={b_total}"
+
     r = client.post(
         "/api/v1/constraints",
         params={"session_id": sid},
-        json={"type": "budget", "content": "预算压到 350", "source": "成员B",
-              "hard": True, "numeric_value": 350},
+        json={"type": "budget", "content": f"预算压到 {tightened}", "source": "成员B",
+              "hard": True, "numeric_value": tightened},
     )
     assert r.status_code == 200, r.text
 
     replay = _plans(client, sid)
-    assert _plan_total(replay, "B") == 393.0, "约束收紧后方案被静默改写（快照语义失效）"
+    assert _plan_total(replay, "B") == b_total, "约束收紧后方案被静默改写（快照语义失效）"
     assert next(p for p in replay["plans"] if p["plan_id"] == "B") == plan_b_snapshot, \
         "约束收紧后载荷不得有任何变化"
     assert _plan_generated_count(client, sid) == 1, "约束变更不得触发第二次方案生成"
 
-    # 选 B → 购物车 393.0 > 最新预算 350.0 → D2 主门 400，overage 43.0
+    # 选 B → 购物车 b_total > 最新预算 → D2 主门 400，overage = b_total - tightened
     r = client.post(
         "/api/v1/cart/select_plan",
         params={"session_id": sid, "plan_id": "B"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["total"] == 393.0
+    assert r.json()["total"] == b_total
 
     r = client.post(
         "/api/v1/paypal/create_order",
         json={
-            "amount": 393.0,
+            "amount": b_total,
             "session_id": sid,
             "user_email": "demo@example.com",
             "item_name": "ECV Group Purchase",
@@ -138,6 +149,6 @@ def test_plans_snapshot_keeps_budget_gate_alive(client):
     assert r.status_code == 400, f"预算守卫必须拦截：{r.status_code} {r.text}"
     detail = r.json()["detail"]
     assert detail["status"] == "budget_violated", detail
-    assert abs(detail["overage"] - 43.0) < 1e-6, detail
-    assert abs(detail["budget_limit"] - 350.0) < 1e-6, detail
-    assert abs(detail["cart_total"] - 393.0) < 1e-6, detail
+    assert abs(detail["overage"] - (b_total - tightened)) < 1e-6, detail
+    assert abs(detail["budget_limit"] - tightened) < 1e-6, detail
+    assert abs(detail["cart_total"] - b_total) < 1e-6, detail

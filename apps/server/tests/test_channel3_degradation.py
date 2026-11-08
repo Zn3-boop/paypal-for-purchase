@@ -55,8 +55,18 @@ _BASE_STATE = {
 }
 
 
-async def _intent_state() -> dict:
-    state = dict(_BASE_STATE)
+# 本地目录真实覆盖的品类（music）与目录外品类（耳机）两套状态：
+# 前者验证"降级后仍有商品"，后者验证"降级也必须诚实收口，不许拿黑胶冒充耳机"。
+_LOCAL_STATE = {
+    "raw_query": "帮我找一张爵士黑胶唱片，预算 300 以内",
+    "user_id": "u-demo",
+    "session_id": "s-demo-local",
+    "monthly_spent": 10.0,
+}
+
+
+async def _intent_state(base: dict | None = None) -> dict:
+    state = dict(base or _BASE_STATE)
     r = parse_intent_node(state)
     if hasattr(r, "__await__"):
         r = await r
@@ -70,7 +80,7 @@ async def _intent_state() -> dict:
 @pytest.mark.asyncio
 async def test_t1_no_key_falls_back_to_local_catalog():
     """T1: Channel3 不可用（无 key / 空结果）→ local_ranker + 本地 catalog 候选。"""
-    state = await _intent_state()
+    state = await _intent_state(_LOCAL_STATE)  # 用目录真实覆盖的品类（music）
 
     # 强制 L1 空结果（等价于无 key / 搜索无命中）
     with patch(
@@ -83,6 +93,23 @@ async def test_t1_no_key_falls_back_to_local_catalog():
     assert out["shopping_selected"]["name"]
     # 本地目录商品没有 source 字段（不是 Channel3 来源）
     assert out["shopping_selected"].get("source") != "channel3"
+
+
+@pytest.mark.asyncio
+async def test_t1b_out_of_catalog_query_is_honestly_empty():
+    """T1b: 降级也不能"抢答"——本地目录没有耳机时，宁可空选也不拿黑胶冒充。"""
+    state = await _intent_state()  # _BASE_STATE = 降噪耳机（目录外品类）
+
+    with patch(
+        "app.services.channel3.search_products_for_query",
+        new=AsyncMock(return_value=[]),
+    ):
+        out = await taste_select_node(state)
+
+    assert out["shopping_rank_source"] == "local_ranker"
+    assert out["shopping_selected"] == {}, "目录外品类不能有「选中商品」"
+    assert out["shopping_error"] == "no_relevant_candidates"
+    assert out["shopping_candidates"], "兜底提示仍需列出目录里真实可选的商品"
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +142,7 @@ async def test_t2_channel3_l1_success():
 @pytest.mark.asyncio
 async def test_t3_channel3_exception_degrades_not_crash():
     """T3: 抛异常 → 节点仍返回 local_ranker 兜底（HTTP 200 不 500）+ 降级日志。"""
-    state = await _intent_state()
+    state = await _intent_state(_LOCAL_STATE)
 
     records: list[logging.LogRecord] = []
     handler = logging.Handler()
@@ -136,10 +163,8 @@ async def test_t3_channel3_exception_degrades_not_crash():
     assert any("降级" in r.getMessage() or "Channel3" in r.getMessage() for r in records), (
         "应记录降级原因日志"
     )
-    r = parse_intent_node(state)
-    if hasattr(r, "__await__"):
-        r = await r
-    return {**state, **r}
+
+
 # ---------------------------------------------------------------------------
 # T6：可解释性面板透出 rank_source / llm_source / source
 # ---------------------------------------------------------------------------

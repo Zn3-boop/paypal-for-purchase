@@ -30,6 +30,22 @@ export function EventDataSummary({ log }: { log: AuditLogEntry }) {
       text = `订单 ${oid || '?'} ${fromLabel}→${toLabel}${d.reason ? ` · ${d.reason}` : ''}`
       break
     }
+    case 'intent_submitted':
+      text = `关键词「${d.query ?? '?'}」 · ${d.mode === 'group' ? '团购' : d.mode === 'single' ? '单人' : d.mode || '?'} · 提取 ${d.extracted_count ?? 0} 条约束`
+      break
+    case 'payment_started': {
+      const oid = String(d.order_id ?? '').slice(-10)
+      text = `订单 ${oid ? `#${oid}` : ''} · ${d.mode || ''} 模式 · ${d.amount != null ? `${d.amount} ${d.currency || 'USD'}` : ''}${d.paypal_order_id ? ` · PP ${String(d.paypal_order_id).slice(0, 12)}` : ''}`
+      break
+    }
+    case 'payment_failed': {
+      const oid = String(d.order_id ?? '').slice(-10)
+      text = `订单 ${oid ? `#${oid}` : '(未落档)'} · ${d.reason || d.paypal_order_id ? `${d.reason || ''} ${d.paypal_order_id ? `PP ${String(d.paypal_order_id).slice(0, 12)}` : ''}` : ''}`.trim()
+      break
+    }
+    case 'payment_cancelled':
+      text = `订单 ${String(d.order_id ?? '').slice(-10) || '(未落档)'} · ${d.reason || '用户或系统取消'}`
+      break
     case 'budget_violated':
       text = `超限 ${d.actual_total}/${d.budget_limit} · ${d.resolution || ''}`
       break

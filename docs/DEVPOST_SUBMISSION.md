@@ -20,15 +20,16 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
    delete**. Delete intents are resolved deterministically against existing structured
    constraints (0-hit / multi-hit / mixed add+delete are surfaced, never guessed) and never
    sent to an LLM.
-2. **方案对比** — hard constraints pre-filter the catalog, then low-price (A) and durable (B)
+2. **方案对比** — hard constraints pre-filter the catalog, then low-price (A) and best-match (B)
    plans are generated with trade-offs, risks and *who was sacrificed*.
 3. **对话与支付 / 复核** — natural-language cart edits, split-bill preview, HITL confirmation.
 4. **审计时间轴** — append-only JSONL of every decision: constraint change, plan generation,
    cart modification, review confirmation, every state transition, payment completion,
-   guardrail failures.
+   guardrail failures. The log is written to disk, so the timeline is rebuilt after a restart.
 5. **订单档案** — order list, auto-expanded detail from the PayPal success CTA, state-machine
    transitions, item snapshot, related audit events, and **read-only natural-language order
-   queries** with server-enforced session ownership.
+   queries** with server-enforced session ownership. Order records are appended to
+   `data/orders/orders.jsonl` and reloaded on startup.
 
 ## Technical highlights
 
@@ -74,12 +75,17 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
 - `create_order` double-click → same PayPal token/approval URL, gateway called once.
 - Order archive/query probes: `session_id` required (422), cross-session access 403, foreign
   order id answered without leaking, polling stops once no order is `paying`.
-- Frontend `tsc -b --force`, `eslint .`, `vite build` all green; ~630 backend tests in repo.
+- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **124 passed**
+  (`tests/test_restart_persistence.py` covers restart recovery of the order archive and the audit
+  timeline).
 
 ## Honest limitations
 
-- Session state and order registry are in-memory (demo-grade): restarting the API resets them,
-  and the idempotent approval-URL reuse only survives while the pending-order registry lives.
+- Session state (constraints / cart / plan snapshot) is in-memory (demo-grade): restarting the API
+  resets the live session and the pending PayPal approval-URL registry. **Order records and the
+  audit timeline are persisted** as JSONL (`data/orders/orders.jsonl`,
+  `data/audit_logs/<user>/audit_<date>.jsonl`) and reloaded on startup, so the order archive and
+  audit trail survive a restart even though the in-progress session does not.
 - Split payment is simulated with a payout schedule (single sandbox merchant account), not real
   multi-recipient payouts.
 - The K1 catalog is a curated mock dataset used as an offline fallback for Channel3.

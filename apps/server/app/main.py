@@ -70,6 +70,13 @@ _mode_lines = [
     f"[mode] channel3={'real' if _settings.channel3_api_key else 'fallback(k1_catalog)'}",
 ]
 print(" | ".join(_mode_lines))
+# 回跳地址必须一眼可见：PayPal 登录后「页面打不开」100% 是这两行里的主机/端口和浏览器
+# 实际访问的 origin 对不上（例如后端还跑着改配置前的老进程，或 .env 没被加载）。
+print(
+    f"[link] paypal_return={_settings.paypal_return_url} | "
+    f"paypal_cancel={_settings.paypal_cancel_url} | "
+    f"frontend_base={_settings.frontend_base_url}"
+)
 _allowed_origins = [o.strip() for o in _settings.cors_origins.split(",") if o.strip()]
 
 app.add_middleware(

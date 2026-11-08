@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from langgraph.graph import StateGraph, START, END
@@ -106,11 +107,40 @@ _PAYMENT_KEYWORDS = (
     "帮我下单", "帮我付款", "买一个", "买一张", "买一份", "来一个",
 )
 
+# 「找/推荐」不是购买动词，但用户问商品时同样必须进支付子图：
+# 否则「帮我找一副 300 以内的降噪耳机」会落到通用代理，最终只剩空兜底（"处理完成。"）。
+_FIND_KEYWORDS = (
+    "找", "推荐", "挑", "帮我选", "有没有", "想要", "想买",
+    "find", "recommend", "looking for", "search for",
+)
+# 只有同时出现"购物信号"才认作购物请求，避免「帮我找一下代码」「推荐一首歌」被支付子图抢走。
+_SHOPPING_SIGNALS = (
+    "以内", "以下", "不超过", "预算", "左右", "块钱", "元", "价格",
+    "耳机", "唱片", "门票", "套餐", "礼盒", "蓝光", "捐款", "礼物", "用品",
+    "under", "budget", "price", "$",
+)
+
+
+def _looks_like_shopping_request(raw: str) -> bool:
+    """找/推荐 + 购物信号 => 购物请求（支付子图入口）。
+
+    单纯出现「找」不算：`帮我找一下代码` 必须继续走 code_search，不能被支付子图劫持。
+    """
+    if not raw:
+        return False
+    if not any(kw in raw for kw in _FIND_KEYWORDS):
+        return False
+    if any(kw in raw for kw in _SHOPPING_SIGNALS):
+        return True
+    return bool(re.search(r"\d{2,}", raw))
+
 
 def _has_payment_intent(state: AgentState) -> bool:
     """从 raw_query / route_target 探测支付意图（优先级高于文化推荐）。"""
     raw = (state.get("raw_query") or "").lower()
     if any(kw in raw for kw in _PAYMENT_KEYWORDS):
+        return True
+    if _looks_like_shopping_request(raw):
         return True
     route_target = state.get("route_target", "") or ""
     return route_target in ("payment_node", "shopping_payment", "payment_parse_intent")
@@ -126,12 +156,35 @@ def route_after_payment_authority(state: AgentState) -> str:
     return "payment_approval_gate"
 
 
+def route_after_payment_taste(state: AgentState) -> str:
+    """选品后路由：目录里没有相关商品时直接收口，不进授权/支付节点。
+
+    目录只有 8 件文化/餐饮品；用户问「降噪耳机」这类目录外品类时，ranker 仍会
+    给一个"最接近"的商品（拿黑胶唱片冒充耳机）。taste_select 用词元重合判定
+    no_relevant_candidates 并清空 shopping_selected，这里据此直接收口，
+    由 _state_to_response 输出诚实兜底（列出目录真实可选商品 + 拼单入口）。
+    """
+    if state.get("shopping_error") == "no_relevant_candidates":
+        return "memory_persist_node"
+    if state.get("shopping_selected"):
+        return "payment_authority_check"
+    return "memory_persist_node"
+
+
+
 def route_after_payment_approval(state: AgentState) -> str:
     """审批闸门后路由：approved 放行创建订单；否则（cancelled/pending）终止。"""
     status = state.get("approval_status", "")
     if status == "approved":
         return "payment_paypal_create"
     return "memory_persist_node"
+
+
+def route_after_payment_create(state: AgentState) -> str:
+    """建单失败才结束；成功订单进入捕获前的真实买家审批等待点。"""
+    if state.get("paypal_status") == "create_failed":
+        return "memory_persist_node"
+    return "payment_paypal_capture"
 
 
 def route_after_risk(state: AgentState) -> str:
@@ -239,6 +292,7 @@ _UNSET = object()
 def build_agent_graph(
     checkpointer: Any = _UNSET,
     interrupt_before_approval: bool = True,
+    interrupt_before_paypal_capture: bool = False,
 ):
     # A档保底路径：最简可编译图（无 checkpointer），保留供 A档测试 / 降级参考；
     from app.services.graph.nodes import (
@@ -346,8 +400,11 @@ def build_agent_graph(
     builder.add_node("hitl_approval_node", hitl_approval_node)
 
     # ===== 授权边界支付子图节点 =====
+    async def payment_taste_select_in_catalog(state: AgentState) -> dict[str, Any]:
+        return await taste_select_node({**state, "strict_catalog_scope": True})
+
     builder.add_node("payment_parse_intent", parse_intent_node)
-    builder.add_node("payment_taste_select", taste_select_node)
+    builder.add_node("payment_taste_select", payment_taste_select_in_catalog)
     builder.add_node("payment_authority_check", authority_check_node)
     builder.add_node("payment_approval_gate", approval_gate_node)
     builder.add_node("payment_paypal_create", paypal_create_node)
@@ -379,7 +436,14 @@ def build_agent_graph(
     )
     # ===== 授权边界支付子图连线 =====
     builder.add_edge("payment_parse_intent", "payment_taste_select")
-    builder.add_edge("payment_taste_select", "payment_authority_check")
+    builder.add_conditional_edges(
+        "payment_taste_select",
+        route_after_payment_taste,
+        {
+            "payment_authority_check": "payment_authority_check",
+            "memory_persist_node": "memory_persist_node",
+        },
+    )
     builder.add_conditional_edges(
         "payment_authority_check", route_after_payment_authority,
         {
@@ -395,7 +459,14 @@ def build_agent_graph(
             "memory_persist_node": "memory_persist_node",
         },
     )
-    builder.add_edge("payment_paypal_create", "payment_paypal_capture")
+    builder.add_conditional_edges(
+        "payment_paypal_create",
+        route_after_payment_create,
+        {
+            "payment_paypal_capture": "payment_paypal_capture",
+            "memory_persist_node": "memory_persist_node",
+        },
+    )
     builder.add_edge("payment_paypal_capture", "payment_explain")
     builder.add_edge("payment_explain", "memory_persist_node")
     builder.add_conditional_edges(
@@ -540,6 +611,10 @@ def build_agent_graph(
     interrupt_nodes = ["approval_node"] if interrupt_before_approval else []
     interrupt_nodes.append("hitl_approval_node")
     interrupt_nodes.append("payment_approval_gate")
+    if interrupt_before_paypal_capture:
+        # 真实 PayPal 留下捕获前 checkpoint；由 HTTP 层按启动模式启用。
+        # 直接节点调用与原有图测试默认不增加此中断。
+        interrupt_nodes.append("payment_paypal_capture")
 
     graph = builder.compile(
         checkpointer=cp,

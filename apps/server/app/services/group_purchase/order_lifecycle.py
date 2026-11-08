@@ -21,13 +21,16 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable
 
 from app.services.group_purchase.audit_log import (
@@ -125,6 +128,97 @@ def _new_order_id() -> str:
     return f"ord_{uuid.uuid4().hex[:8]}"
 
 
+# ============================================================
+# 订单档案落盘（JSONL 追加写）：重启后「📦 订单档案」不丢
+#   - 每条状态变化追加一行完整记录，同一 order_id 以最后一行为准
+#   - 用 ORDER_STORE_DIR 覆盖存储目录（测试/部署可用）
+# ============================================================
+
+_ORDERS_FILE_NAME = "orders.jsonl"
+_disk_lock = threading.Lock()
+
+
+def get_orders_store_dir() -> Path:
+    return Path(os.getenv("ORDER_STORE_DIR", "./data/orders"))
+
+
+def get_orders_file_path() -> Path:
+    store_dir = get_orders_store_dir()
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return store_dir / _ORDERS_FILE_NAME
+
+
+def _append_to_disk(order: OrderRecord) -> None:
+    try:
+        with _disk_lock:
+            with open(get_orders_file_path(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(order.to_dict(), ensure_ascii=False) + "\n")
+    except Exception as exc:  # pragma: no cover - 落盘失败不应阻断支付主链路
+        logger.warning("order persist failed for %s: %s", order.order_id, exc)
+
+
+def order_from_dict(data: dict[str, Any]) -> OrderRecord:
+    """把 JSONL 中的一行还原为 OrderRecord（缺字段时使用安全默认值）。"""
+    raw_status = str(data.get("status") or OrderStatus.DRAFT.value)
+    try:
+        status = OrderStatus(raw_status)
+    except ValueError:
+        status = OrderStatus.DRAFT
+    now = datetime.now(timezone.utc).isoformat()
+    return OrderRecord(
+        order_id=str(data["order_id"]),
+        session_id=str(data["session_id"]),
+        user_id=str(data.get("user_id") or "demo-user"),
+        total=float(data.get("total") or 0.0),
+        currency=str(data.get("currency") or "USD"),
+        plan_id=data.get("plan_id"),
+        paypal_token=data.get("paypal_token"),
+        items=list(data.get("items") or []),
+        status=status,
+        created_at=str(data.get("created_at") or now),
+        updated_at=str(data.get("updated_at") or now),
+        cancelled_reason=data.get("cancelled_reason"),
+        transitions=list(data.get("transitions") or []),
+    )
+
+
+def load_orders_from_disk() -> int:
+    """从 JSONL 恢复订单档案（进程重启后调用）。返回恢复的订单条数。
+
+    只做增量补齐（setdefault）：已在内存中的订单以运行时状态为准，
+    避免磁盘上的旧行覆盖正在支付的订单。
+    """
+    path = get_orders_file_path()
+    if not path.exists():
+        return 0
+
+    latest: dict[str, OrderRecord] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = order_from_dict(json.loads(line))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+                latest[record.order_id] = record  # 追加写：后出现的行为准
+    except OSError as exc:  # pragma: no cover
+        logger.warning("order store read failed: %s", exc)
+        return 0
+
+    if not latest:
+        return 0
+
+    with _orders_lock:
+        for order_id, record in latest.items():
+            _orders.setdefault(order_id, record)
+
+    logger.info("order store restored %d records from %s", len(latest), path)
+    return len(latest)
+
+
 def get_order_record(order_id: str) -> OrderRecord | None:
     with _orders_lock:
         return _orders.get(order_id)
@@ -140,10 +234,11 @@ def list_order_records(session_id: str | None = None) -> list[OrderRecord]:
 
 
 def _save(order: OrderRecord) -> None:
-    """持久化订单记录（内存注册表；若后续引入 JSONL 可在此扩展）。"""
+    """持久化订单记录：内存注册表 + JSONL 追加写（重启后可恢复）。"""
     order.updated_at = datetime.now(timezone.utc).isoformat()
     with _orders_lock:
         _orders[order.order_id] = order
+    _append_to_disk(order)
 # ============================================================
 # 转移守卫（Guard）
 # ============================================================
@@ -195,12 +290,15 @@ def _amount_to_cents(value: Any) -> int:
 # ============================================================
 
 def reconcile_sessions_on_startup() -> int:
-    """对账进程内订单：发现审计链有 payment_completed 但订单仍 paying 的，补偿转移到 paid。
+    """启动对账：先恢复订单档案，再补偿「审计已有 payment_completed 但订单仍 paying」。
 
-    这是对 D2 副门崩溃窗口的显式补偿（见 paypal_callback.py 注释“细节 3”）。
     返回补偿次数，便于日志观察。
     """
     from app.services.group_purchase.audit_log import get_audit_logger, log_order_status_changed
+
+    restored = load_orders_from_disk()
+    if restored:
+        logger.info("startup: restored %d order records from disk", restored)
 
     comp_count = 0
     pending = [o for o in list_order_records()]  # 无 session_id 过滤，遍历全库

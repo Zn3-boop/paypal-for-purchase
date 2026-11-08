@@ -9,7 +9,7 @@
   {
     item, amount, currency,
     rank_source, match_tags, anchors,
-    authority: {verdict, rule, reason, llm_reason, risk_level, trust_score},
+    authority: {verdict, rule, reason, llm_reason, risk_level, trust_score, auto_threshold},
     approval:  {status, comment, evidence_applied},
     payment:   {mode, order_id, capture_id, status, msg, approval_url, error},
     trust:     {old_score, new_score, evidence_grade, evidence_claim},
@@ -55,6 +55,7 @@ def assemble_explainability_panel(state: dict[str, Any]) -> dict[str, Any]:
                 "llm_reason": authority.get("llm_reason", ""),
                 "risk_level": authority.get("risk_level", ""),
                 "trust_score": authority.get("trust_score"),
+                "auto_threshold": authority.get("auto_threshold"),
                 "goal_conflicts": list(authority.get("goal_conflicts", []) or []),
                 "impulse_signals": list(
                     (authority.get("impulse", {}) or {}).get("signals", []) or []

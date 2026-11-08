@@ -32,11 +32,13 @@ class FakePayPalClient:
 
     def __init__(self, capture_id: str = "CAP-999") -> None:
         self.created: list[dict] = []
+        self.create_kwargs: list[dict] = []
         self.captured: list[dict] = []
         self.fail_capture = False
         self.capture_id = capture_id  # 可注入 "CAP-MOCK-1" 验证防火墙
 
     async def create_order(self, **kwargs):
+        self.create_kwargs.append(kwargs)
         order = {
             "id": "ORDER-123",
             "status": "CREATED",
@@ -111,7 +113,9 @@ class TestCaptureHardening:
         assert svc.get_intent(out_create["paypal_intent_id"]) is not None
         assert svc.get_intent("biz-intent-001") is None, "业务 id 不得被当成 service key"
 
-        merged = {**state, **out_create}
+        # 回跳前不能 capture；收到 PayPal return 才进入第二程。
+        assert (await nodes.paypal_capture_node({**state, **out_create}))["paypal_status"] == "created"
+        merged = {**state, **out_create, "payer_approved": True}
 
         # 第二程：capture —— 真实回执，禁止 mock id 混入
         out_cap = await nodes.paypal_capture_node(merged)
@@ -154,6 +158,7 @@ class TestCaptureHardening:
             paypal_intent_id="ghost-uuid-000",  # service 内不存在
             paypal_order_id="ORDER-GHOST",
             paypal_status="created",
+            payer_approved=True,
         )
         out = await nodes.paypal_capture_node(state)
         assert out["paypal_status"] == "capture_failed", f"未命中必须显式失败，got {out}"
@@ -174,6 +179,27 @@ class TestCaptureHardening:
         assert len(svc._client.captured) == 0, "缺 id 时不得触网"
 
     @pytest.mark.asyncio
+    async def test_payer_return_required_before_capture(self, monkeypatch):
+        monkeypatch.setattr(nodes, "PAYMENT_MODE", "real")
+        state = _create_state(paypal_status="created", paypal_intent_id="intent-1")
+        out = await nodes.paypal_capture_node(state)
+        assert out["paypal_status"] == "created"
+        assert "等待买家" in out["paypal_msg"]
+
+    @pytest.mark.asyncio
+    async def test_payer_return_reuses_created_order(self, monkeypatch):
+        monkeypatch.setattr(nodes, "PAYMENT_MODE", "real")
+        svc = PayPalPaymentService(client=FakePayPalClient())
+        state = _create_state(
+            payment_service=svc,
+            paypal_status="created",
+            paypal_intent_id="intent-1",
+            paypal_order_id="ORDER-123",
+        )
+        assert await nodes.paypal_create_node(state) == {}
+        assert svc._client.created == []
+
+    @pytest.mark.asyncio
     async def test_capture_mock_id_firewall_rejects(self, monkeypatch):
         """语义断言防火墙：service 异常返回 mock capture id -> 按失败处理。"""
         monkeypatch.setattr(nodes, "PAYMENT_MODE", "real")
@@ -188,6 +214,7 @@ class TestCaptureHardening:
             paypal_intent_id=intent.id,
             paypal_order_id="ORDER-123",
             paypal_status="created",
+            payer_approved=True,
         )
         out = await nodes.paypal_capture_node(state)
         assert out["paypal_status"] == "capture_failed", f"防火墙必须拦截，got {out}"
@@ -218,6 +245,7 @@ class TestCaptureHardening:
             paypal_intent_id=intent2.id,
             paypal_order_id=intent2.paypal_order_id,
             paypal_status="created",
+            payer_approved=True,
         )
         out = await nodes.paypal_capture_node(state)
         assert out["paypal_status"] == "capture_failed"

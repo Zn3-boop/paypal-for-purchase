@@ -278,6 +278,22 @@ async def taste_select_node(state: dict[str, Any]) -> dict[str, Any]:
     if not ranked:
         return {"shopping_candidates": [], "shopping_rank_source": "local_ranker"}
 
+    # 目录外品类必须诚实收口（2026-11-05 用户实测：问"300 以内的降噪耳机"，
+    # 本地目录里根本没有耳机，ranker 仍会拿黑胶唱片冒充）。ranker 的分数里含
+    # 品类权重，score>0 不等于"相关"——这里用「词元/标签重合 + 品类命中」判定，
+    # 不相关就把购物车清空并打上 shopping_error，由 graph 直接收口到诚实兜底。
+    if not _candidates_match_intent(ranked, category=category, anchors=anchors, rank_source=rank_source):
+        logger.info("taste_select: 目录内无相关候选（category=%s，query=%r）", category, state.get("raw_query", ""))
+        return {
+            "shopping_candidates": ranked,  # 保留给兜底提示：列出目录真实可选
+            "shopping_selected": {},
+            "shopping_rank_source": rank_source,
+            "shopping_error": "no_relevant_candidates",
+            "shopping_intent_id": _gen_intent_id(category),
+            "shopping_anchors": anchors,
+            "shopping_budget": budget,
+        }
+
     return {
         "shopping_candidates": ranked,
         "shopping_intent_id": _gen_intent_id(category),
@@ -286,6 +302,47 @@ async def taste_select_node(state: dict[str, Any]) -> dict[str, Any]:
         "shopping_anchors": anchors,
         "shopping_budget": budget,
     }
+
+
+# 目录里真实存在、且能由关键词确定性判定的品类。
+_SPECIFIC_CATEGORIES = {"music", "dining", "film", "donation"}
+
+
+def _candidates_match_intent(
+    ranked: list[dict[str, Any]],
+    *,
+    category: str,
+    anchors: list[str],
+    rank_source: str,
+) -> bool:
+    """候选是否真的与意图相关（而不是"本地排序里最不相关的那个"）。
+
+    判定顺序：
+      1. Channel3 真实搜索命中 -> 视为相关（它就是按 query 搜出来的商品）；
+      2. 品类命中（music/dining/film/donation 这类具体品类）-> 相关；
+      3. 标签或名称与检索锚点有直接词元重合 -> 相关；
+      4. 否则不相关（例如查询"降噪耳机"落到 merch，而目录里没有 merch）。
+    """
+    if not ranked:
+        return False
+    if rank_source == "channel3":
+        return True
+    if category in _SPECIFIC_CATEGORIES:
+        if any(str(c.get("category", "")) == category for c in ranked):
+            return True
+    for c in ranked:
+        if c.get("match_tags"):
+            return True
+        name = str(c.get("name", ""))
+        tags_blob = " ".join(str(t) for t in (c.get("tags") or []))
+        for anchor in anchors:
+            token = str(anchor or "").strip().lower()
+            # 单字符/泛化词（merch、goods…）不算证据，避免误判
+            if len(token) < 2 or token in {"merch", "goods", "purchase", "payment", "shopping"}:
+                continue
+            if token in name.lower() or token in tags_blob.lower():
+                return True
+    return False
 
 
 # ============================================================
@@ -560,6 +617,11 @@ async def paypal_create_node(state: dict[str, Any]) -> dict[str, Any]:
 
     PAYMENT_MODE=mock 时用假订单；=real 时调 PayPalPaymentService。
     """
+    # 幂等：订单已创建（paypal_status="created"）时不重复创建，等待买家回跳后再 capture
+    if state.get("paypal_status") == "created":
+        logger.info("paypal_create: 订单已创建，跳过重复 create（paypal_status=created）")
+        return {}
+
     selected = state.get("shopping_selected", {}) or {}
     authority = state.get("authority", {}) or {}
     try:
@@ -592,15 +654,26 @@ async def paypal_create_node(state: dict[str, Any]) -> dict[str, Any]:
                 },
             )
             intent, _ = svc.authorize_payment(intent.id)
-            # 回跳落地页必须是前端页面，不能是 example.com 死链：
-            # 该链路真正的 capture 由图内 paypal_capture_node 完成，因此回跳
-            # 指向复核页而不是 callback 端点，避免同一订单被二次 capture。
-            frontend = (_get_settings().frontend_base_url or "").rstrip("/")
+            # 回跳统一走后端 8000 的共享入口 /api/v1/paypal/callback?flow=payment：
+            # 与团购共用同一条"买家回跳 -> 校验 token -> 捕获"的路径，
+            # 不再由前端复核页二次触发 capture（避免同一订单被二次捕获）。
+            # 注意：settings.paypal_return_url 已是完整回调地址
+            #   （默认 http://localhost:8000/api/v1/paypal/callback），不要再拼路径。
+            #   此前用 frontend_base_url（=5173）再靠 Vite 代理 /api 转发，
+            #   一旦代理/端口不一致，PayPal 登录后回跳就打不开页面（历史事故）。
+            settings = _get_settings()
+            backend_base = (settings.paypal_return_url or "").rstrip("/")
+            frontend = (settings.frontend_base_url or "").rstrip("/")
             session_id = state.get("session_id", "") or ""
+            from urllib.parse import urlencode
+
+            return_qs = urlencode({"flow": "payment", "session_id": session_id})
+            cancel_qs = urlencode({"tab": "shop", "session_id": session_id, "status": "cancelled"})
+            sep = "&" if "?" in backend_base else "?"
             intent, msg = await svc.create_payment_order(
                 intent.id,
-                return_url=f"{frontend}/payment/review?session_id={session_id}&status=returned",
-                cancel_url=f"{frontend}/payment/review?session_id={session_id}&status=cancelled",
+                return_url=f"{backend_base}{sep}{return_qs}",
+                cancel_url=f"{frontend}/?{cancel_qs}",
             )
             # P2-10 修复（双字段隔离）：
             #   - shopping_intent_id 保持业务 intent 稳定 id（选品阶段，全程不变，
@@ -716,7 +789,23 @@ async def paypal_capture_node(state: dict[str, Any]) -> dict[str, Any]:
                 "paypal_msg": "捕获失败：缺少支付订单标识",
                 "paypal_error": "；".join(caveats),
                 "evidence_caveats": caveats,
+                "capture_failure_kind": "missing_intent_id",
                 "decision_trace": _trace("", "capture_failed"),
+                "paypal_mode": "real",
+                "paypal_source": PAYPAL_REAL_SOURCE,
+            }
+        # 买家未回跳（payer_approved 未设）时，capture 不应执行
+        # （application approval != PayPal buyer approval）
+        if not state.get("payer_approved", False):
+            caveats.append("买家尚未回跳（payer_approved 未设），等待 PayPal return")
+            logger.info("paypal_capture: 等待买家审批，跳过 capture")
+            return {
+                "paypal_status": "created",
+                "capture_id": "",
+                "paypal_msg": "PayPal 订单已创建，等待买家审批",
+                "paypal_error": "",
+                "evidence_caveats": caveats,
+                "decision_trace": _trace("", "created"),
                 "paypal_mode": "real",
                 "paypal_source": PAYPAL_REAL_SOURCE,
             }
@@ -734,6 +823,7 @@ async def paypal_capture_node(state: dict[str, Any]) -> dict[str, Any]:
                     "paypal_msg": "捕获失败：找不到对应订单",
                     "paypal_error": "；".join(caveats),
                     "evidence_caveats": caveats,
+                    "capture_failure_kind": "intent_not_found",
                     "decision_trace": _trace("", "capture_failed"),
                     "paypal_mode": "real",
                     "paypal_source": PAYPAL_REAL_SOURCE,
@@ -750,6 +840,7 @@ async def paypal_capture_node(state: dict[str, Any]) -> dict[str, Any]:
                     "paypal_msg": "捕获失败：收到异常捕获标识",
                     "paypal_error": "；".join(caveats),
                     "evidence_caveats": caveats,
+                    "capture_failure_kind": "mock_capture_id",
                     "decision_trace": _trace("", "capture_failed"),
                     "paypal_mode": "real",
                     "paypal_source": PAYPAL_REAL_SOURCE,
@@ -771,6 +862,7 @@ async def paypal_capture_node(state: dict[str, Any]) -> dict[str, Any]:
                 "paypal_msg": msg,
                 "paypal_error": "；".join(caveats),
                 "evidence_caveats": caveats,
+                "capture_failure_kind": "capture_incomplete",
                 "decision_trace": _trace("", "capture_failed"),
                 "paypal_mode": "real",
                 "paypal_source": PAYPAL_REAL_SOURCE,
@@ -784,6 +876,7 @@ async def paypal_capture_node(state: dict[str, Any]) -> dict[str, Any]:
                 "paypal_msg": f"捕获失败：{exc}",
                 "paypal_error": "；".join(caveats),
                 "evidence_caveats": caveats,
+                "capture_failure_kind": "capture_exception",
                 "decision_trace": _trace("", "capture_failed"),
                 "paypal_mode": "real",
                 "paypal_source": PAYPAL_REAL_SOURCE,
@@ -827,8 +920,15 @@ async def explain_node(state: dict[str, Any]) -> dict[str, Any]:
     intent.description = f"品味驱动购买：{selected.get('name', '')}"
 
     # B 级证据：订单结果事实（captured=成功，否则失败）
+    capture_failure_kind = state.get("capture_failure_kind", "")
+    # 仅把「用户信任相关」的失败（用户拒绝/拒批/拒付）视为信任降级；
+    # 技术性捕获失败（缺少 intent_id、intent 未命中、mock capture id、
+    # 捕获未完成、异常）是系统问题，不应惩罚用户信任分。
+    trust_relevant_failure = capture_failure_kind in ("user_rejected", "buyer_rejected", "payment_rejected")
     evidence = eve.build_order_outcome_evidence(
-        intent, succeeded=(paypal_status == "captured")
+        intent,
+        succeeded=(paypal_status == "captured"),
+        trust_relevant_failure=trust_relevant_failure,
     )
     from app.services.payment_agent.evidence import apply_evidence
 

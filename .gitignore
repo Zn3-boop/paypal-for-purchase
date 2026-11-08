@@ -1,3 +1,12 @@
+# One-off local cleanup / probe scripts (never part of the project)
+/*_clean*.py
+/*_clean_utf8.py
+apps/web/tsc-out.txt
+temp_ci_venv/
+
+# Historical golden-path archives (keep the canonical snapshot in docs/, not the whole history)
+docs/archive/
+
 # Dependencies
 node_modules/
 venv/

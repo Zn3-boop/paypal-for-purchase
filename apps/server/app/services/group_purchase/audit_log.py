@@ -28,6 +28,13 @@ AuditEventType = Literal[
     "fallback_triggered",       
     "order_status_changed",     
     "payment_amount_mismatch",
+    # 统一入口 / 支付 Agent 链路事件（单人 & 团购共用同一套时间轴）：
+    #   intent_submitted —— 用户在同一个 Agent 提问框提交需求（含 Channel3 检索关键词）
+    #   payment_started  —— 支付 Agent 已向 PayPal 建单（订单号 / 金额 / 来源）
+    #   payment_failed   —— 支付 Agent 建单或捕获失败（失败也要留痕，不能静默消失）
+    "intent_submitted",
+    "payment_started",
+    "payment_failed",
 ]
 
 
@@ -114,6 +121,55 @@ class AuditLogger:
         
         return entry
     
+    def _store_user_dirs(self, user_id: str | None) -> list[str]:
+        """列出需要扫描的用户目录（指定 user_id 时只扫该目录）。"""
+        if user_id:
+            return [os.path.join(self.store_dir, user_id)]
+        if not os.path.isdir(self.store_dir):
+            return []
+        return [
+            os.path.join(self.store_dir, name)
+            for name in sorted(os.listdir(self.store_dir))
+            if os.path.isdir(os.path.join(self.store_dir, name))
+        ]
+
+    def _read_from_disk(
+        self,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        event_type: AuditEventType | None = None,
+    ) -> list[AuditLogEntry]:
+        """直接扫描 JSONL 日志文件（进程重启后内存缓存为空时使用）。
+
+        不传 user_id 时会遍历所有用户目录 —— 否则「按 session 查时间轴」在重启后
+        只能命中内存缓存，磁盘上有记录却查不出来。
+        """
+        results: list[AuditLogEntry] = []
+        for user_dir in self._store_user_dirs(user_id):
+            if not os.path.isdir(user_dir):
+                continue
+            for log_file in sorted(Path(user_dir).glob("audit_*.jsonl")):
+                try:
+                    with open(log_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                                entry = AuditLogEntry(**data)
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                            if session_id and entry.session_id != session_id:
+                                continue
+                            if event_type and entry.event != event_type:
+                                continue
+                            results.append(entry)
+                except OSError:
+                    continue
+        results.sort(key=lambda x: x.timestamp)
+        return results
+
     def get_logs(
         self,
         session_id: str | None = None,
@@ -121,30 +177,27 @@ class AuditLogger:
         event_type: AuditEventType | None = None,
         limit: int = 100,
     ) -> list[AuditLogEntry]:
-        results: list[AuditLogEntry] = []
-        
+        """按会话/用户/事件类型读取审计日志（时间正序，仅保留最近 limit 条）。
+
+        缓存未命中（例如刚重启后端）时回落到 JSONL 磁盘扫描，并把结果回填缓存，
+        保证「📜 审计时间轴」在重启后依然完整可见。
+        """
         with self._lock:
             if session_id and session_id in self._log_cache:
-                results = self._log_cache[session_id][-limit:]
-            else:
-                if user_id:
-                    user_dir = os.path.join(self.store_dir, user_id)
-                    if os.path.isdir(user_dir):
-                        for log_file in sorted(Path(user_dir).glob("audit_*.jsonl")):
-                            with open(log_file, "r", encoding="utf-8") as f:
-                                for line in f:
-                                    try:
-                                        data = json.loads(line.strip())
-                                        entry = AuditLogEntry(**data)
-                                        
-                                        if event_type and entry.event != event_type:
-                                            continue
-                                        results.append(entry)
-                                    except json.JSONDecodeError:
-                                        continue
-        
-        results.sort(key=lambda x: x.timestamp, reverse=True)
-        return results[:limit]
+                results = self._log_cache[session_id]
+                if event_type:
+                    results = [e for e in results if e.event == event_type]
+                return results[-limit:]
+
+            results = self._read_from_disk(
+                session_id=session_id,
+                user_id=user_id,
+                event_type=event_type,
+            )
+            if session_id and results:
+                # 回填缓存（按时间正序），后续轮询不再扫盘
+                self._log_cache[session_id] = results[-500:]
+            return results[-limit:]
     
     def get_session_timeline(self, session_id: str) -> list[AuditLogEntry]:
         return self.get_logs(session_id=session_id, limit=200)
@@ -420,5 +473,75 @@ def log_payment_amount_mismatch(
             "captured_amount": round(float(captured_amount), 2),
             "expected_amount": round(float(expected_amount), 2),
             "paypal_token": paypal_token,
+        },
+    )
+
+
+def log_intent_submitted(
+    session_id: str,
+    user_id: str,
+    actor: str,
+    *,
+    query: str,
+    mode: str,
+    extracted_count: int = 0,
+    source: str = "agent_composer",
+) -> AuditLogEntry:
+    """统一入口留痕：一个提问框同时服务单人购买与团购。
+
+    query 是真正传给 Channel3 的检索关键词（不是二次改写过的词），
+    这样审计时间轴能回答用户那句「你到底是按哪个关键词推荐的」。
+    """
+    logger = get_audit_logger()
+    return logger.log(
+        session_id=session_id,
+        user_id=user_id,
+        actor=actor,
+        event="intent_submitted",
+        data={
+            "query": query,
+            "mode": mode,
+            "extracted_count": extracted_count,
+            "entry": source,
+        },
+    )
+
+
+def log_payment_event(
+    session_id: str,
+    user_id: str,
+    actor: str,
+    *,
+    event: Literal["payment_started", "payment_failed"],
+    order_id: str = "",
+    paypal_order_id: str = "",
+    amount: float | None = None,
+    currency: str = "USD",
+    item_name: str = "",
+    mode: str = "",
+    source: str = "",
+    reason: str = "",
+    business_order_id: str = "",
+) -> AuditLogEntry:
+    """支付 Agent 建单 / 失败留痕：成功与失败都必须能在审计时间轴看到。
+
+    失败不是噪声：`capture_failed` / `failed` 是「这笔支付尝试真实发生过」的证据，
+    用户要求「哪怕显示创建失败」也要有一条记录。
+    """
+    logger = get_audit_logger()
+    return logger.log(
+        session_id=session_id,
+        user_id=user_id,
+        actor=actor,
+        event=event,
+        data={
+            "order_id": business_order_id or order_id,
+            "paypal_order_id": paypal_order_id,
+            "amount": round(float(amount), 2) if amount is not None else None,
+            "currency": currency,
+            "item_name": item_name,
+            "mode": mode,
+            "source": source,
+            "reason": reason,
         },
     )

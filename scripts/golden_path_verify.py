@@ -42,12 +42,16 @@ class FakePayPalGateway:
     def __init__(self) -> None:
         self.counter = 0
         self._force_fail_capture = False
+        # 金额必须以"创建时的真实金额"回显：此前硬编码 24.5 会在拍品总额变化后
+        # 触发 D2 副门（实扣 != 订单金额），把正常路径误判成异常。
+        self._amounts: dict[str, float] = {}
 
     def create_order(self, amount: float, item_name: str = "ECV Group Purchase Order",
                      return_url: str | None = None, cancel_url: str | None = None,
                      reference_id: str = "group-purchase-ref", currency: str = "USD"):
         self.counter += 1
         token = f"FAKE-ORDER-{self.counter:06d}"
+        self._amounts[token] = round(float(amount), 2)
         return {
             "order_id": token,
             "approval_url": f"https://sandbox.paypal.com/fake-approve/{token}",
@@ -73,7 +77,7 @@ class FakePayPalGateway:
             "order_id": order_id,
             "status": "COMPLETED",
             "capture_id": f"CAP-FAKE-{order_id}",
-            "amount": 24.5,
+            "amount": self._amounts.get(order_id, 0.0),
             "currency": "USD",
             "final_capture": True,
             "seller_protection": "ELIGIBLE",

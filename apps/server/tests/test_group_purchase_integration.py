@@ -14,7 +14,13 @@ from app.services.group_purchase import (
     generate_dual_plans,
     prefilter_by_constraints,
 )
+from app.services.channel3 import Channel3Result
 from app.services.shopper.catalog import get_catalog_items
+
+
+def _result(items):
+    """把 mock 商品列表包成三态结果：空列表 = empty（检索成功但无匹配）。"""
+    return Channel3Result(list(items), "ok" if items else "empty", "")
 
 
 @pytest.mark.asyncio
@@ -34,8 +40,8 @@ async def test_channel3_priority_when_available():
     ]
     
     with patch(
-        "app.services.channel3.search_products_for_query",
-        return_value=mock_channel3_items,
+        "app.services.channel3.search_products_with_status",
+        return_value=_result(mock_channel3_items),
     ):
         constraints = [
             Constraint(
@@ -64,8 +70,8 @@ async def test_fallback_to_local_catalog():
     """Channel3 失败时降级本地 catalog。"""
     # 模拟 Channel3 失败
     with patch(
-        "app.services.channel3.search_products_for_query",
-        return_value=[],  # 空结果视为失败
+        "app.services.channel3.search_products_with_status",
+        return_value=_result([]),  # 空结果 = empty（检索成功但无匹配）
     ):
         constraints = [
             Constraint(
@@ -156,7 +162,8 @@ async def test_dual_plan_trade_offs():
     plan_b = result["plan_b"]
     
     assert plan_a["strategy"] == "低价优先"
-    assert plan_b["strategy"] == "耐用优先"
+    # 统一思想：B 不再是「另一套策略的另一篮货」，而是 A 的同品类匹配升级
+    assert plan_b["strategy"] == "匹配优先"
     
     # 验证总价计算正确
     total_a = sum(item["subtotal"] for item in plan_a["items"])

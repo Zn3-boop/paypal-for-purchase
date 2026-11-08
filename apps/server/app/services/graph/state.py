@@ -189,6 +189,7 @@ class AgentState(TypedDict, total=False):
     approval_url: str                        # PayPal 授权跳转 URL
     capture_id: str
     paypal_error: str                        # PayPal 异常降级原因（real 失败→mock 兜底）
+    payer_approved: bool                     # PayPal 回跳确认买家批准后才可 capture
     evidence_caveats: list[str]              # 诚实标注：捕获失败/未扣款/降级原因（面板展示，禁止假成功）
     paypal_mode: str                         # mock / real
     paypal_source: str                       # 来源标记：mock / sandbox_real / live_real（前端徽标 + 一致性断言）

@@ -10,6 +10,9 @@ type Props = {
 export function AuditTimeline({ sessionId }: Props) {
   const [logs, setLogs] = useState<AuditLogEntry[]>([])
   const [expanded, setExpanded] = useState<number | null>(null)
+  // 与「订单档案」去重：订单状态流转（order_status_changed 等）在订单档案里更完整，
+  // 这里默认仍全量展示（可追溯），但可一键只看核心决策事件。
+  const [coreOnly, setCoreOnly] = useState(false)
 
   useEffect(() => {
     if (!sessionId) return
@@ -27,25 +30,49 @@ export function AuditTimeline({ sessionId }: Props) {
   }, [sessionId])
 
   const coreCount = logs.filter(l => EVENT_META[l.event]?.core).length
+  const orderNoise = logs.filter(l => l.event === 'order_status_changed').length
+  const visibleLogs = coreOnly ? logs.filter(l => EVENT_META[l.event]?.core) : logs
 
   return (
     <div style={{ background: '#0f172a', borderRadius: 12, padding: 16, border: '1px solid #374151' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
         <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#E5E7EB' }}>📜 审计时间轴</h3>
-        {logs.length > 0 && (
-          <div style={{ fontSize: 11, color: '#9CA3AF' }}>
-            {coreCount}/5 核心事件
-          </div>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            onClick={() => { setCoreOnly(v => !v); setExpanded(null) }}
+            title="隐藏订单状态流转（这些记录在 📦 订单档案 里更完整）"
+            style={{
+              fontSize: 10, padding: '3px 8px', borderRadius: 99, cursor: 'pointer',
+              border: `1px solid ${coreOnly ? '#3B82F6' : '#4B5563'}`,
+              background: coreOnly ? '#1E3A5F' : 'transparent',
+              color: coreOnly ? '#93C5FD' : '#9CA3AF', fontWeight: 700,
+            }}
+          >
+            {coreOnly ? '只看核心事件 ✓' : '只看核心事件'}
+          </button>
+          {logs.length > 0 && (
+            <div style={{ fontSize: 11, color: '#9CA3AF' }}>
+              {coreCount}/5 核心事件
+            </div>
+          )}
+        </div>
       </div>
 
-      {logs.length === 0 ? (
+      {/* 分工说明：审计=「为什么这么决策」，订单档案=「订单现在到哪一步」 */}
+      <div style={{ fontSize: 10, color: '#6B7280', marginBottom: 10, lineHeight: 1.5 }}>
+        本面板记录决策链（约束解析 → 检索 → 选方案 → 审批 → 支付）。
+        订单状态流转{orderNoise > 0 ? `（${orderNoise} 条）` : ''}请到 📦 订单档案 查看，那里有每次状态变更的前后状态与原因。
+      </div>
+
+      {visibleLogs.length === 0 ? (
         <div style={{ fontSize: 12, color: '#6B7280', fontStyle: 'italic', textAlign: 'center', padding: 20 }}>
-          暂无审计记录 — 开始一次团购流程后，每个决策步骤都会在此留痕。
+          {logs.length === 0
+            ? '暂无审计记录 — 开始一次团购流程后，每个决策步骤都会在此留痕。'
+            : '已过滤掉订单状态流转事件 — 取消「只看核心事件」可查看全量。'}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 0, maxHeight: 360, overflowY: 'auto' }}>
-          {logs.slice().reverse().map((log, idx) => {
+          {visibleLogs.slice().reverse().map((log, idx) => {
             const meta = EVENT_META[log.event] || { icon: '·', color: '#6B7280', label: log.event, core: false }
             const isLast = idx === 0
             const isOpen = expanded === idx

@@ -33,6 +33,8 @@ export interface PaymentAgentResponse {
     error?: string
     source?: string
     intent_id?: string
+    paypal_order_id?: string
+    business_order_id?: string
     evidence_caveats?: string[]
   }
   authority: {
@@ -42,6 +44,7 @@ export interface PaymentAgentResponse {
     llm_reason?: string
     risk_level?: string
     trust_score?: number
+    auto_threshold?: number
     goal_conflicts?: string[]
     impulse_signals?: string[]
     llm_source?: string
@@ -245,6 +248,41 @@ export interface PlanItem {
   matched_constraints?: string[]
   source?: string
   rationale?: string
+  /** Channel3 证据：商品图、标签、关键词匹配分（本地 catalog 时为空）。 */
+  image_url?: string
+  tags?: string[]
+  match_score?: number
+  match_tags?: string[]
+}
+
+/** 赞助商 Channel3 检索到、但「不完全匹配」本次需求的商品（回落本地时单独展示）。 */
+export interface SponsorRelatedItem {
+  id: string
+  name: string
+  price: number
+  currency?: string
+  category?: string
+  image_url?: string
+  tags?: string[]
+}
+
+/** 检索证据：「推荐依据」的数据源。query 是用户原句，search_query 是实际发给 Channel3 的检索词。 */
+export interface RetrievalEvidence {
+  query?: string
+  search_query?: string
+  source?: string
+  candidate_count?: number
+  matched_count?: number
+  /** 检索层诚实说明（如命中全不相干 → 已回落本地目录 / 已过滤 N 件） */
+  note?: string
+  /**
+   * Channel3 三态（进字段，不只进文案）：
+   *   ok=命中 / empty=检索成功但商品库无匹配 / error=检索暂时不可用（可重试） / disabled=未启用
+   */
+  channel3_status?: 'ok' | 'empty' | 'error' | 'disabled' | ''
+  /** Channel3（赞助商）最接近但不完全匹配的商品：绝不混进方案，单独成卡。 */
+  sponsor_related?: SponsorRelatedItem[]
+  sponsor_note?: string
 }
 
 /** 预算 Guardrail 检查结果（对齐后端 budget_guardrail.check_budget）。 */
@@ -285,8 +323,12 @@ export interface PlansComparison {
   total_delta?: number
   item_count_a?: number
   item_count_b?: number
+  shared_count?: number
+  only_a_count?: number
+  only_b_count?: number
   budget_limit?: number
   recommendation?: string
+  upgrades?: { item?: string; category?: string; from?: number; to?: number; delta?: number }[]
 }
 
 export interface PlansResponse {
@@ -300,7 +342,53 @@ export interface PlansResponse {
   comparison?: PlansComparison
   budget_limit?: number
   constraint_count?: number
+  intent_query?: string
+  intent_mode?: 'single' | 'group'
+  retrieval?: RetrievalEvidence
   [key: string]: unknown
+}
+
+/** 统一入口：同一个 Agent 提问框同时服务单人/团购。返回本次检索关键词与更模式。 */
+export interface IntentResponse {
+  ok: boolean
+  query: string
+  mode: 'single' | 'group'
+  extracted_count: number
+  added_ids?: string[]
+  /** 被本次提问替换掉的上一次自动约束 id（手动添加的约束不受影响）。 */
+  replaced_count?: number
+  removed_ids?: string[]
+  constraints_count?: number
+  message?: string
+}
+
+export async function submitIntent(sessionId: string, message: string): Promise<IntentResponse> {
+  const resp = await fetch(
+    `${API_BASE}/plans/intent?session_id=${encodeURIComponent(sessionId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, source: 'agent_composer' }),
+    },
+  )
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(body?.detail || `Intent submit failed: ${resp.status}`)
+  }
+  return await resp.json()
+}
+
+/** 显式重算方案（快照唯一主动失效入口）：改完约束 / 换口味后调它，再 fetchPlans 拿新方案。 */
+export async function regeneratePlans(sessionId: string): Promise<{ ok: boolean; query: string; constraints_count: number }> {
+  const resp = await fetch(
+    `${API_BASE}/plans/regenerate?session_id=${encodeURIComponent(sessionId)}`,
+    { method: 'POST' },
+  )
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(body?.detail || `Regenerate plans failed: ${resp.status}`)
+  }
+  return await resp.json()
 }
 
 export async function fetchPlans(sessionId: string): Promise<PlansResponse> {

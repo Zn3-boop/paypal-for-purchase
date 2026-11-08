@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.services.group_purchase.budget_guardrail import calc_total
@@ -90,15 +91,14 @@ def _fallback_rule_based_parse(
     
     # 简单关键词匹配
     if "删" in inst_lower or "去掉" in inst_lower or "不要" in inst_lower:
-        # 尝试找商品 ID
-        for item in cart:
-            if item.id in inst_lower or item.name.split()[0] in inst_lower:
-                modifications.append(CartModificationRequest(
-                    modification_type="delete_item",
-                    target_item_id=item.id,
-                    explanation=f"检测到删除指令：{instruction}",
-                ))
-                break
+        # 用与 LLM 路径同一套确定性匹配（整名 → token 覆盖），不依赖 split()[0]
+        hit = _match_item_in_text(instruction, cart)
+        if hit is not None:
+            modifications.append(CartModificationRequest(
+                modification_type="delete_item",
+                target_item_id=hit.id,
+                explanation=f"检测到删除指令：{instruction}",
+            ))
     
     if "加" in inst_lower or "补" in inst_lower or "再来" in inst_lower:
         modifications.append(CartModificationRequest(
@@ -130,6 +130,64 @@ def _fallback_rule_based_parse(
     )
 
 
+def _name_tokens(name: str) -> list[str]:
+    """把商品名切成可用于匹配的 token（字母/数字/中文，长度 ≥2）。"""
+    return [t for t in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", (name or "").lower()) if len(t) >= 2]
+
+
+def _match_item_in_text(instruction: str, cart: list[PlanItem]) -> PlanItem | None:
+    """在指令里**确定性地**找出要改的那件商品。
+
+    为什么需要它：LLM 只是「可能」给出 target_item_id。实测用户直接贴商品名
+    （「删掉 54087X-R7 - 5 Man Rod - Blue - 1 Pack」）时，模型经常只回
+    modification_type=delete_item 却不带 id；执行阶段于是什么也没删，
+    总价变化 +0.00，界面却显示「已改单」——用户看到的就是"价格没减少"。
+    这里用「整名/整 ID 包含 → token 覆盖率」两级匹配兜底，不依赖模型发挥。
+    """
+    text = (instruction or "").lower()
+    if not text or not cart:
+        return None
+
+    # ① 整名 / 整 ID 出现在指令里（最长优先，避免子串误命中）
+    best: PlanItem | None = None
+    best_len = 0
+    for it in cart:
+        for key in (it.id, it.name):
+            k = (key or "").strip().lower()
+            if len(k) >= 3 and k in text and len(k) > best_len:
+                best, best_len = it, len(k)
+    if best is not None:
+        return best
+
+    # ② token 覆盖率：用户只打了一部分名字时（例如「删掉 5 Man Rod 那件」）
+    best_score = 0.0
+    for it in cart:
+        tokens = _name_tokens(it.name)
+        if not tokens:
+            continue
+        score = sum(1 for t in tokens if t in text) / len(tokens)
+        if score > best_score:
+            best, best_score = it, score
+    return best if best_score >= 0.6 else None
+
+
+def _repair_targets(
+    parsed: CartModificationOutput,
+    instruction: str,
+    cart: list[PlanItem],
+) -> CartModificationOutput:
+    """LLM 漏给 / 给错 target_item_id 时，按商品名把目标补回来。"""
+    for mod in parsed.modifications:
+        if mod.modification_type not in ("delete_item", "swap_item"):
+            continue
+        if mod.target_item_id and any(it.id == mod.target_item_id for it in cart):
+            continue
+        hit = _match_item_in_text(instruction, cart)
+        if hit is not None:
+            mod.target_item_id = hit.id
+    return parsed
+
+
 async def execute_modifications(
     session_id: str,
     user_id: str,
@@ -158,12 +216,23 @@ async def execute_modifications(
     old_total = calc_total([{"price": it.price, "quantity": it.quantity} for it in current_cart])
     
     warnings: list[str] = []
-    
+    # 记录"真的改动了什么"：改单最容易翻车的地方是「指令解析到了、执行却是空操作」，
+    # 于是总价 +0.00 但界面报"已改单"。这里以副作用为准，没有副作用就不算成功。
+    applied: int = 0
+    unmet_targets: list[str] = []
+
     # 依次执行修改
     for mod in modifications:
         if mod.modification_type == "delete_item":
             if mod.target_item_id:
+                before = len(current_cart)
                 current_cart = [it for it in current_cart if it.id != mod.target_item_id]
+                if len(current_cart) < before:
+                    applied += 1
+                else:
+                    unmet_targets.append(mod.target_item_id)
+            else:
+                unmet_targets.append("（没指明要删哪件）")
         elif mod.modification_type == "swap_item":
             if mod.target_item_id and mod.replacement_item_id:
                 # 在 catalog 中找到替换商品
@@ -173,7 +242,10 @@ async def execute_modifications(
                     for i, item in enumerate(current_cart):
                         if item.id == mod.target_item_id:
                             current_cart[i] = PlanItem.from_dict(new_item_dict)
+                            applied += 1
                             break
+                    else:
+                        unmet_targets.append(mod.target_item_id)
                 else:
                     warnings.append(f"未找到替换商品 {mod.replacement_item_id}")
         elif mod.modification_type == "add_item":
@@ -192,6 +264,7 @@ async def execute_modifications(
                     warnings.append("未指定添加的具体商品，已添加默认项")
             elif new_item_dict is not None:
                 current_cart.append(PlanItem.from_dict(new_item_dict))
+            applied += 1
         elif mod.modification_type == "adjust_budget":
             if mod.new_constraint_value:
                 # 查找预算约束并更新
@@ -199,10 +272,14 @@ async def execute_modifications(
                     if c.type == "budget" and c.hard and c.status == "active":
                         c.numeric_value = float(mod.new_constraint_value)
                         c.status = "active"
+                        applied += 1
                         break
         elif mod.modification_type == "adjust_constraint":
             # 通用约束调整
             pass
+
+    for target in unmet_targets:
+        warnings.append(f"没在购物车里找到要改的商品：{target}")
     
     new_total = calc_total([{"price": it.price, "quantity": it.quantity} for it in current_cart])
     delta = new_total - old_total
@@ -281,8 +358,12 @@ async def execute_modifications(
     )
     
     return {
-        "success": budget_ok or len(warnings) == 0,
-        "message": f"修改完成，总价变化 {delta:+.2f}",
+        "success": applied > 0 and budget_ok,
+        "message": (
+            f"修改完成，总价变化 {delta:+.2f}"
+            if applied > 0
+            else "没有识别到可执行的改动（没匹配到购物车里的商品）。请带上商品名，例如「删掉 <商品名>」"
+        ),
         "updated_cart": [item.to_dict() for item in current_cart],
         "new_total": round(new_total, 2),
         "budget_ok": budget_ok,
@@ -317,6 +398,9 @@ async def modify_cart_and_replan(
         }
     
     parsed = await parse_modification_intent(user_instruction, current_cart, catalog)
+    # 确定性补目标：LLM 只回类型不回 id 时，按商品名/ID 在指令里把 target 找回来，
+    # 否则 delete_item 会变成空操作（总价不变却报"已改单"）。
+    parsed = _repair_targets(parsed, user_instruction, current_cart)
     
     # 2. 执行修改
     result = await execute_modifications(

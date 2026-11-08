@@ -11,20 +11,32 @@ Zero credentials required to run: `PAYMENT_MODE=mock` runs the full pipeline (ap
 create -> capture) against a mock PayPal client. Flip to `real` with sandbox credentials and
 the same flow hits `api-m.sandbox.paypal.com`.
 
-## 30-second judge path
+## Judge path (about 3 minutes, all in the web UI)
 
-1. Open the **Payment tab** (it is the default landing tab). The yellow banner shows the
-   **PayPal sandbox buyer account** - log in with it when the approval link opens.
-2. Set a savings goal in the 🎯 box: **「我要存钱买相机」** -> *已保存*.
-3. Ask: **「帮我买一张周五晚上听的爵士唱片」** -> the agent selects a jazz record, runs the
-   authorization engine, and **stops for your approval** with a reason (enjoyment spend
-   conflicts with the savings goal -> blocked rule). No order is created yet.
-4. Click **✓ Approve & Pay** -> a PayPal sandbox order is created (mock or real) and captured.
-5. Watch the trust score tick up (A-grade approval evidence), the **Explainability Evidence**
-   panel showing *why*, and the **○ Rule fallback / ● Real LLM generated** source badge on every reply.
+The app has three panels: **选购方案 / Decisions**, **审计时间轴 / Audit**, **订单档案 / Orders**.
 
-Repeat with small low-trust/low-amount flows and observe the trust score compounding across
-sessions (persisted per user via the memory store).
+1. In the request box type: **「社团采购：预算不超过 600 美元，不要塑料，给户外活动用」**
+   -> constraints are extracted into the dashboard, and two plans (**A** low-price / **B**
+   best-match) appear below with real trade-off numbers.
+2. Check the evidence line under the plans: the query actually sent to **Channel3**, how many
+   candidates came back, and which source was used (`channel3` or the local fallback catalog).
+3. Click **选这个方案** -> the confirmation modal opens with the amount, a natural-language cart
+   edit box, the budget guard result, and (in group mode) the split-bill preview.
+4. Type **「删掉最贵的那件」** -> the cart total really drops and the modal re-checks budget.
+   Confirm -> PayPal **sandbox** approval page -> approve.
+5. You land back on the app: the paid order auto-expands in **订单档案** with its state-machine
+   transitions, and **审计时间轴** shows the whole chain
+   (`constraint_changed` -> `plan_generated` -> `cart_modified` -> `review_confirmed` ->
+   `confirmed` -> `paying` -> `payment_completed` -> `paid`).
+6. Ask **「我的订单到哪一步了？」** -> the answer comes from the state machine, not from the LLM.
+
+Restarting the API clears the live session but **not** the audit timeline or the order archive:
+both are JSONL on disk and are reloaded on startup (see `tests/test_restart_persistence.py`).
+
+The single-purchase authorization-boundary subgraph described below is still fully wired at the
+API level (`POST /api/v1/payment/agent` -> `approve` -> `callback`, covered by the payment-agent
+integration tests). The web UI deliberately exposes only one checkout path per plan so the same
+purchase cannot be re-composed behind the user's back.
 
 ## Why an authorization boundary?
 
@@ -89,8 +101,8 @@ Python 3.12+ (recommended 3.12)
 
 ### 1. Clone and enter
 ```bash
-git clone <your-repo-url>
-cd ecv-paypal/apps/server
+git clone https://github.com/Zn3-boop/paypal-for-purchase.git
+cd paypal-for-purchase/apps/server
 ```
 
 ### 2. Create venv and install
@@ -109,11 +121,22 @@ Edit `.env` — no changes are required to run in mock mode. To test real links:
 - Set `CHANNEL3_API_KEY` for real Channel3 product search.
 - Set `LLM_MODE=real` + `LLM_API_KEY` for real LLM decisions.
 
-### 4. Run
+### 4. Run the API
 ```bash
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
-Open `http://localhost:8000` (or the frontend port configured in your web app).
+The API runs on port **8000** (FastAPI docs at `http://localhost:8000/docs`).
+
+### 5. Run the web UI (separate terminal)
+```bash
+cd ../../apps/web
+npm install
+npm run dev
+```
+Open `http://localhost:3000` — Vite proxies `/api` to `http://127.0.0.1:8000`.
+
+Make sure `FRONTEND_BASE_URL` in `apps/server/.env` is `http://localhost:3000` (the web dev port)
+so PayPal return/cancel redirects land back in the app after approval.
 
 ### Docker (one-command)
 ```bash

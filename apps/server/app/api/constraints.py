@@ -226,22 +226,55 @@ async def _extract_with_llm(text: str, source: str) -> list[dict]:
     return _simple_rule_extraction(text, source)
 
 
+def _extract_budget_number(text: str) -> float | None:
+    """从一句话里提取「预算金额」，而不是第一个出现的数字。
+
+    "帮我找 5 人份的环保桌游奖品，预算 300 美元" → 300，而不是 5。
+    策略：优先取「预算/budget/不超过/以内/上限/控制在/只有」等关键词后方最近的数字；
+    协商不到就退而求其次——取紧跟"元/美元/块"前的数字；仍无则判定无预算数字。
+    """
+    try:
+        nums = [
+            (m.start(), float(m.group(1).replace(",", "")))
+            for m in re.finditer(r"(\d[\d,.]*)", text.replace("，", ","))
+        ]
+    except (ValueError, AttributeError):
+        return None
+    if not nums:
+        return None
+    tl = text.lower()
+    best: tuple[int, float] | None = None
+    for kw in ("预算", "budget", "不超过", "以内", "上限", "控制在", "只有"):
+        for km in re.finditer(re.escape(kw), tl):
+            for pos, num in nums:
+                # 数字必须紧跟关键词之后（允许 ≤ < = 和空格）
+                if km.start() <= pos and pos - km.end() <= 4:
+                    if best is None or (pos - km.end()) < best[0]:
+                        best = (pos - km.end(), num)
+    if best is not None:
+        return best[1]
+    # 兜底：紧跟货币单位之前的数字（"预算 300" / "300 美元" / "300块"）
+    currency = re.search(r"(\d[\d,.]*)\s*(元|美元|美刀|块|dollars?|usd)", tl)
+    if currency:
+        try:
+            return float(currency.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
 def _simple_rule_extraction(text: str, source: str) -> list[dict]:
     """规则降级提取。"""
     extracted = []
     tl = text.lower()
 
     if "预算" in tl or "budget" in tl or "不超过" in tl or "以内" in tl:
-        match = re.search(r"(\d[\d,.]*)", text)
-        if match:
-            try:
-                num = float(match.group(1).replace(",", ""))
-                extracted.append({
-                    "type": "budget", "content": f"总预算≤{num}",
-                    "source": source, "hard": True, "numeric_value": num,
-                })
-            except ValueError:
-                pass
+        num = _extract_budget_number(text)
+        if num is not None:
+            extracted.append({
+                "type": "budget", "content": f"总预算≤{num}",
+                "source": source, "hard": True, "numeric_value": num,
+            })
 
     if any(kw in tl for kw in ["不要", "排除", "禁用", "avoid", "no "]):
         extracted.append({

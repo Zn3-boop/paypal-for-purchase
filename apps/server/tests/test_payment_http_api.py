@@ -64,6 +64,9 @@ def test_payment_agent_need_approval_then_approve(client):
     assert body2["payment"]["capture_id"] == "CAP-MOCK-1"
     assert body2["explain"]["text"], "事后解释必须存在"
     assert body2["explain"]["trust_updated"], "信任分必须回写"
+    assert float(body2["explain"]["trust_updated"]["new_score"]) > float(
+        body2["explain"]["trust_updated"]["old_score"]
+    )
     assert body2["authority"]["verdict"] == "need_approval"  # 授权判定保留
 
 
@@ -167,3 +170,79 @@ def test_trust_score_persists_across_sessions(client):
 
     # 第三程：0.5 仍低于自动放行门槛 0.6 -> 依旧停在审批（渐进式授权：信任逐步累积）
     assert body3["needs_approval"] is True
+
+
+@pytest.mark.parametrize("high_trust", [False, True], ids=["manual-approval", "auto-approval"])
+def test_real_paypal_return_uses_shared_callback_before_capture(monkeypatch, high_trust):
+    """无论是否免应用审批，建单后都必须等待买家回跳才能捕获。"""
+    from app.api import payment as payment_api
+    from app.services.payment_agent import nodes
+    from app.services.paypal import service as paypal_service
+    from app.services.paypal.service import PayPalPaymentService
+    from tests.test_payment_capture_hardening import FakePayPalClient
+
+    fake = FakePayPalClient()
+    service = PayPalPaymentService(client=fake)
+    session = f"http-real-payer-return-{high_trust}"
+    monkeypatch.setattr(nodes, "PAYMENT_MODE", "real")
+    monkeypatch.setattr(paypal_service, "get_payment_service", lambda: service)
+    if high_trust:
+        from dataclasses import replace
+        from app.services.paypal.authz import TrustProfile
+
+        trusted = replace(TrustProfile(), trust_score=0.9, auto_threshold=100.0)
+        monkeypatch.setattr(payment_api, "_load_trust_profile", lambda _user_id: trusted)
+    from app.services.graph.graph import build_agent_graph
+
+    graph = build_agent_graph(interrupt_before_paypal_capture=True)
+    assert "payment_paypal_capture" in graph.interrupt_before_nodes
+    monkeypatch.setattr(payment_api, "_graph_instance", graph)
+    monkeypatch.setattr(payment_api, "_get_graph", lambda: graph)
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    r1 = client.post("/api/v1/payment/agent", json={
+        "message": "帮我买一张爵士唱片",
+        "session_id": session,
+        "user_id": "http-user-real-return",
+    })
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["needs_approval"] is not high_trust
+    if high_trust:
+        assert r1.json()["authority"]["verdict"] == "allow_auto"
+        r2 = r1  # 高信任仅跳过应用审批，PayPal 买家审批仍不可省略。
+    else:
+        r2 = client.post("/api/v1/payment/approve", json={
+            "session_id": session,
+            "user_id": "http-user-real-return",
+            "decision": "approve",
+        })
+    body2 = r2.json()
+    assert r2.status_code == 200, r2.text
+    assert body2["payment"]["status"] == "created"
+    assert body2["payment"]["capture_id"] == ""
+    assert len(fake.created) == 1 and fake.captured == []
+    # 与团购使用同一后端回跳入口；经前端代理转发。
+    assert "/api/v1/paypal/callback?flow=payment" in fake.create_kwargs[0]["return_url"]
+
+    bad = client.get(
+        "/api/v1/paypal/callback",
+        params={"flow": "payment", "session_id": session, "token": "WRONG"},
+    )
+    assert bad.status_code == 409 and fake.captured == []
+    returned = client.get(
+        "/api/v1/paypal/callback",
+        params={
+            "flow": "payment",
+            "session_id": session,
+            "token": "ORDER-123",
+            "PayerID": "PAYER-1",
+        },
+    )
+    body3 = returned.json()
+    assert returned.status_code == 200, returned.text
+    assert body3["payment"]["status"] == "captured"
+    assert body3["payment"]["capture_id"] == "CAP-999"
+    assert body3["explain"]["trust_updated"]["evidence_grade"] == "B"
+    assert len(fake.created) == 1 and len(fake.captured) == 1
+    assert session not in payment_api._PENDING_PAYMENTS

@@ -33,6 +33,11 @@ class PlanItem:
     source: str = "local_catalog"
     matched_constraints: list[str] = field(default_factory=list)
     rationale: str = ""
+    # Channel3 证据字段（前端「推荐依据」直接消费；本地 catalog 时为空）：
+    image_url: str = ""
+    tags: list[str] = field(default_factory=list)
+    match_score: float = 0.0
+    match_tags: list[str] = field(default_factory=list)
     
     def __post_init__(self):
         if self.subtotal == 0.0:
@@ -49,6 +54,10 @@ class PlanItem:
             "source": self.source,
             "matched_constraints": self.matched_constraints,
             "rationale": self.rationale,
+            "image_url": self.image_url,
+            "tags": self.tags,
+            "match_score": self.match_score,
+            "match_tags": self.match_tags,
         }
     
     @classmethod
@@ -63,6 +72,10 @@ class PlanItem:
             source=data.get("source", "local_catalog"),
             matched_constraints=data.get("matched_constraints", []),
             rationale=data.get("rationale", ""),
+            image_url=data.get("image_url", ""),
+            tags=list(data.get("tags") or []),
+            match_score=float(data.get("match_score") or 0),
+            match_tags=list(data.get("match_tags") or []),
         )
 
 
@@ -172,6 +185,13 @@ class GroupPurchaseSession:
     
     # 元数据
     intent_query: str | None = None
+    # 统一入口的模式标记：single（单人购买）/ group（团购拼单）。
+    # 两种模式共用同一条「约束 → 检索 → 双方案 → 支付」流水线，只有预算/分摊展示不同。
+    intent_mode: str = "group"
+    # 由「统一搜索框」提交时自动抽取的约束 id：
+    #   - 每次新提问会整体替换这一批（旧任务的口味/预算不该污染新任务）；
+    #   - 用户在约束看板里**手动添加**的约束不在这个列表里，因此不会被清掉。
+    auto_constraint_ids: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     
@@ -193,6 +213,8 @@ class GroupPurchaseSession:
             "order_id": self.order_id,
             "order_status": self.order_status,
             "intent_query": self.intent_query,
+            "intent_mode": self.intent_mode,
+            "auto_constraint_ids": self.auto_constraint_ids,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "history": self.history[-10:],  # 保留最近 10 个快照
@@ -208,6 +230,8 @@ class GroupPurchaseSession:
             state=data.get("state", "constraint_collection"),
             constraints=constraints,
             intent_query=data.get("intent_query"),
+            intent_mode=data.get("intent_mode", "group"),
+            auto_constraint_ids=list(data.get("auto_constraint_ids") or []),
             created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
             updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat())),
         )

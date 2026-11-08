@@ -17,6 +17,9 @@ export function ConstraintsDashboard({ sessionId }: Props) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [deleteCandidates, setDeleteCandidates] = useState<ConstraintItem[]>([])
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  // 看板默认折叠：约束照旧在后端生效（支付守卫仍会复核），只是不再占满首屏、
+  // 把「方案对比」挤到下面去。需要加/删约束时展开即可。
+  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     if (!sessionId) return
@@ -44,6 +47,21 @@ export function ConstraintsDashboard({ sessionId }: Props) {
       }
     }, 3000)
     return () => clearInterval(interval)
+  }, [sessionId])
+
+  // 随写随显：App 在 intent 提交成功后派发 ecv:constraints-changed，
+  // 这里立即重拉，不等 3s 轮询（否则会出现“共 0 条”/“共 1 条”不同步）
+  useEffect(() => {
+    const reload = () => {
+      if (!sessionId) return
+      fetchConstraints(sessionId)
+        .then(res => {
+          setConstraints(res.constraints?.filter(isActive) || [])
+          setConflicts(res.conflicts || [])
+        })
+    }
+    window.addEventListener('ecv:constraints-changed', reload)
+    return () => window.removeEventListener('ecv:constraints-changed', reload)
   }, [sessionId])
 
   /** A5：新增走 /constraints/extract；删除只做本地匹配 + DELETE（LLM 解析通常 1-3 秒）。 */
@@ -136,9 +154,34 @@ export function ConstraintsDashboard({ sessionId }: Props) {
             {hasConflicts ? '⚠️ 存在约束冲突' : '✅ 所有约束满足'}
           </h3>
         </div>
-        <div style={{ fontSize: 11, color: '#9CA3AF' }}>
-          共 {constraints.length} 条约束
+        <button
+          type="button"
+          onClick={() => setExpanded(v => !v)}
+          aria-expanded={expanded}
+          style={{
+            fontSize: 11, color: '#93C5FD', background: 'transparent',
+            border: '1px solid #3B82F655', borderRadius: 99, padding: '3px 10px', cursor: 'pointer',
+          }}
+        >
+          共 {constraints.length} 条 · {expanded ? '收起 ▴' : '展开 ▾'}
+        </button>
+      </div>
+
+      {/* 折叠态也保留一行摘要：约束在哪、是否还生效，不该让人猜 */}
+      {!expanded && (
+        <div style={{ fontSize: 11, color: '#6B7280' }}>
+          {constraints.length === 0
+            ? '尚未提取到约束 —— 展开可手动添加（预算、人数、忌口…）'
+            : `本任务内生效 · 支付时守卫复核：${constraints.slice(0, 3).map(c => c.content || c.type).join(' / ')}${constraints.length > 3 ? ' …' : ''}`}
         </div>
+      )}
+
+      {expanded && (
+      <>
+
+      {/* 生命周期一句话就够：会话级 + 下次提问替换自动抽取的那批，手动添加保留 */}
+      <div style={{ fontSize: 10, color: '#6B7280', marginBottom: 8 }}>
+        再次提问会替换上次自动抽取的约束；你手动添加的会保留。
       </div>
 
       {/* A5: 自然语言添加约束（POST /constraints/extract，Enter 或按钮触发） */}
@@ -147,7 +190,7 @@ export function ConstraintsDashboard({ sessionId }: Props) {
           value={input}
           onChange={e => setInput(e.target.value)}
           disabled={extracting}
-          placeholder="用自然语言添加约束，如：总预算 600 美元、5 人份、不要塑料制品"
+          placeholder="成员A说总预算 600 美元"
           aria-label="自然语言约束输入"
           style={{ flex: 1, minWidth: 0, padding: '8px 10px', borderRadius: 6, border: '1px solid #374151', background: '#111827', color: '#E5E7EB', fontSize: 12 }}
         />
@@ -218,22 +261,9 @@ export function ConstraintsDashboard({ sessionId }: Props) {
         )}
       </div>
 
-      {/* Footer Stats */}
-      {constraints.length > 0 && (
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #374151', display: 'flex', gap: 16, fontSize: 11 }}>
-          <div style={{ color: '#9CA3AF' }}>
-            <span style={{ color: '#10B981' }}>✓</span> 功能约束:{' '}
-            {constraints.filter(c => c.type === 'functional').length}
-          </div>
-          <div style={{ color: '#9CA3AF' }}>
-            <span style={{ color: '#C77DFF' }}>💰</span> 预算约束:{' '}
-            {constraints.filter(c => c.type === 'budget').length}
-          </div>
-          <div style={{ color: '#9CA3AF' }}>
-            <span style={{ color: '#F59E0B' }}>⚠️</span> 偏好约束:{' '}
-            {constraints.filter(c => c.type === 'taboo' || c.type === 'preference').length}
-          </div>
-        </div>
+      {/* Footer Stats 已删：功能/预算/偏好按类型计数对用户决策没有信息量，
+          真正有用的是上面的约束卡片本身和方案里的守卫结论。 */}
+      </>
       )}
     </div>
   )

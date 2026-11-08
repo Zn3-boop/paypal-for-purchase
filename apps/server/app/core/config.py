@@ -62,8 +62,9 @@ class Settings(BaseSettings):
     # base_url 留空则使用 SDK 默认生产端点 https://api.trychannel3.com。
     channel3_api_key: str = ""
     channel3_base_url: str = ""
-    channel3_timeout_seconds: float = 10.0
-    channel3_max_retries: int = 2
+    channel3_timeout_seconds: float = 5.0
+    channel3_connect_timeout_seconds: float = 3.0
+    channel3_max_retries: int = 1
     channel3_language: str = ""
     channel3_country: str = ""
     channel3_currency: str = ""
@@ -90,6 +91,9 @@ class Settings(BaseSettings):
 
     # ---------- 前端地址（PayPal 回跳后浏览器落地页）----------
     # 必须与 apps/web 的 dev 端口一致（package.json: vite --port 3000）。
+    # 前端落地页地址（PayPal 批准/取消后浏览器跳转目标）。
+    # 默认与 Vite dev（5173）一致；务必与 .env 里的 FRONTEND_BASE_URL 保持同步，
+    # 否则回调成功后会跳到一个并没有在监听的端口（历史事故：默认 3000，页面打不开）。
     frontend_base_url: str = "http://localhost:3000"
 
     # ---------- Payment agent（授权边界支付子图）----------
