@@ -28,6 +28,7 @@ from app.services.group_purchase import search_memory as sm
 from app.services.group_purchase.constraints import Constraint
 from app.services.group_purchase.session_state import (
     PlanItem,
+    ShoppingPlan,
     get_or_create_session,
     get_session,
     update_session,
@@ -229,4 +230,59 @@ def test_force_bypasses_budget_block(tmp_path, monkeypatch):
     assert out["success"] is True
     assert out["guardrail"]["status"] == "fail"
     assert len(out["cart"]["items"]) == 2
+
+
+def _plan(plan_id: str, items: list[PlanItem]) -> ShoppingPlan:
+    return ShoppingPlan(
+        plan_id=plan_id,
+        strategy="test",
+        items=list(items),
+        total=round(sum(i.price * i.quantity for i in items), 2),
+    )
+
+
+def test_placement_says_which_plan_already_has_the_card(tmp_path, monkeypatch):
+    """每张卡都要回答「它和上方 A/B 是什么关系」，这是推荐与对比的结合点。"""
+    monkeypatch.setenv("SEARCH_MEMORY_DIR", str(tmp_path / "mem"))
+    sm.record_search("sess-place-a", "user-rec", QUERY)
+    # 独立 session id：会话字典是进程级的，复用 id 会读到别的测试留下的购物车/方案
+    session = _session("sess-place-a")
+    session.plan_a = _plan(
+        "A", [PlanItem(id="c1", name="Vinyl Record Cleaning Kit", category="music", price=14.5)]
+    )
+    session.plan_b = _plan(
+        "B", [PlanItem(id="c2", name="Jazz Vinyl Record Box Set", category="music", price=39.9)]
+    )
+    update_session(session)
+    monkeypatch.setattr("app.services.channel3.search_products_with_status", _fake_search())
+
+    out = asyncio.run(rec.build_recommendations(session, limit=3))
+    by_name = {c["name"]: c for c in out["items"]}
+
+    assert by_name["Jazz Vinyl Record Box Set"]["placement"] == "in_b"
+    assert by_name["Vinyl Record Cleaning Kit"]["placement"] == "in_a"
+    assert by_name["Jazz Vinyl Record Box Set"]["placement_reason"]
+
+
+def test_placement_outside_both_plans_states_the_rule_that_excluded_it(tmp_path, monkeypatch):
+    """「两方案都没有」不能是裸标签：必须给可复核的排除原因（这里是被预算排除）。"""
+    monkeypatch.setenv("SEARCH_MEMORY_DIR", str(tmp_path / "mem"))
+    sm.record_search("sess-place-b", "user-rec", QUERY)
+    session = _session("sess-place-b", budget=45.0)
+    # 方案里没有 music 品类，所以不会走「同品类已有更便宜的」分支；只剩预算这一条能排除它
+    session.plan_a = _plan(
+        "A", [PlanItem(id="c3", name="Speaker Stand", category="audio", price=40.0)]
+    )
+    session.plan_b = _plan(
+        "B", [PlanItem(id="c4", name="Speaker Stand Pro", category="audio", price=42.0)]
+    )
+    update_session(session)
+    monkeypatch.setattr("app.services.channel3.search_products_with_status", _fake_search())
+
+    out = asyncio.run(rec.build_recommendations(session, limit=3))
+    card = {c["name"]: c for c in out["items"]}["Jazz Vinyl Record Box Set"]
+
+    assert card["placement"] == "neither"
+    assert "超预算" in card["placement_reason"]
+    assert "39.90" in card["placement_reason"]
 

@@ -146,7 +146,10 @@ reproducible from the request alone (same candidate pool, same two objectives). 
 searches changed the pool, the same sentence would yield different plans and the `criteria` block
 would stop being checkable. So history is quarantined in this one lane — the UI says so, and every
 card is tagged `已在方案 A` / `已在方案 B` / `两方案都没有`, which is exactly how the lane complements
-the comparison rather than contaminating it.
+the comparison rather than contaminating it. A `两方案都没有` tag never stands alone: it carries the
+rule that excluded it (`同品类已有更便宜` / `加它会超预算 $X` / `本次需求没要求这个品类`), so the
+third card is a considered-and-rejected option, not filler. Channel3 responses are cached for 30
+minutes, so a slow first search cannot re-trigger a timeout mid-demo.
 
 Adding a card to the cart uses the same guardrail as cart editing: over a hard budget it is
 **blocked with the cart untouched** (`guardrail.status="blocked"`; `force=true` to override), and it
@@ -228,6 +231,19 @@ are the safe defaults in `.env.example`, so judges can clone-and-run without cre
 Set `FRONTEND_BASE_URL=http://localhost:3000` in `apps/server/.env` so PayPal return/cancel
 redirects land back in the app after approval.
 
+**One-command Docker alternative** (no local Node/Python needed):
+
+```bash
+# repo root — keys are optional; the mock defaults run without them
+docker compose up --build
+```
+
+API on http://localhost:8000, app on http://localhost:3000. Server state (`sessions/`, `orders/`,
+`audit_logs/`, `search_memory/`) is written to a Docker named volume, so `docker compose restart`
+demonstrates real restart-proof persistence rather than a page reload. Before filming a walkthrough,
+`python scripts/preflight_demo.py --session-id <id>` must exit 0 (gates: A/B differ with non-empty
+`comparison.upgrades`, and the recommendation lane is `ok` with 3 cards).
+
 ## Environment variables (apps/server/.env)
 
 | Variable | Default | Purpose |
@@ -301,7 +317,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 147 tests
+python -m pytest -q        # 149 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /

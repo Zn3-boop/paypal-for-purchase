@@ -19,9 +19,23 @@ export type PaymentChatMsg = {
 const SESSION_KEY = 'payment.session.v1'
 const CHAT_KEY = 'payment.chat.v1'
 
-/** Stable session id per browser (survives reloads so trust can compound). */
+/**
+ * Stable session id per browser (survives reloads so trust can compound).
+ *
+ * `?fresh=1` 强制开新会话（清掉旧 id 与聊天），是彩排/录制的隔离开关：
+ * 彩排时点过的加购会写进那个 session 的审计流水，用同一个 id 录制就会多出一条
+ * 观众没看见的事件，而"13 个事件"是口播的核心数字。彩排一个 id，录制另一个。
+ */
 function loadSessionId(): string {
   try {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('fresh') === '1') {
+      localStorage.removeItem(SESSION_KEY)
+      localStorage.removeItem(CHAT_KEY)
+      params.delete('fresh')
+      const qs = params.toString()
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    }
     const existing = localStorage.getItem(SESSION_KEY)
     if (existing) return existing
     const id = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`

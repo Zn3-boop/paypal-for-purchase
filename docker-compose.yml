@@ -19,6 +19,8 @@ services:
       - LLM_MODEL=qwen3.8-flash
     volumes:
       - ./apps/server:/app
+      # 会话/订单/审计/检索记忆全部在 /app/data：容器重启也丢不了，restart-proof 不是页面刷新糊弄
+      - server-data:/app/data
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
@@ -30,10 +32,13 @@ services:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
+      args:
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
     ports:
       - "3000:3000"
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000
     depends_on:
       server:
         condition: service_healthy
+
+volumes:
+  server-data:

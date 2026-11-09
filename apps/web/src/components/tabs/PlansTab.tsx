@@ -384,6 +384,10 @@ function DiffView({ planA, planB, comparison }: {
   const onlyACount = comparison?.only_a_count ?? onlyA.length
   const onlyBCount = comparison?.only_b_count ?? onlyB.length
   const upgrades = comparison?.upgrades || []
+  // 逐件合计 vs 总价差：能对上就明说「可逐条核对」，对不上就老实说差额来自件数不同，
+  // 不让 UI 出现「合计 +$17、总价差 +$12」这种自相矛盾的数字。
+  const upgradeSum = round2(upgrades.reduce((s, u) => s + (u.delta || 0), 0))
+  const reconciled = Math.abs(upgradeSum - delta) < 0.01
   const [open, setOpen] = useState(true)
 
   return (
@@ -406,12 +410,28 @@ function DiffView({ planA, planB, comparison }: {
             <DiffColumn title="共有商品" items={common} color="#34D399" />
             <DiffColumn title="仅方案 B" items={onlyB} color="#FBBF24" />
           </div>
+          {/* 叙述层：B 不是一个"更贵的方案"，而是一次具体的替换操作。
+              先看换了哪几件、合计多少；价格差退成第二行做核对 —— 评委看到的是决策，不是差价。 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, color: '#9CA3AF' }}>
-              价格差：
-              <span style={{ color: delta > 0 ? '#FBBF24' : '#34D399', fontWeight: 700 }}>
-                {delta > 0 ? `B 比 A 贵 ${fmtUsd(delta)}` : delta < 0 ? `A 比 B 贵 ${fmtUsd(-delta)}` : '两方案价格相同'}
-              </span>
+              {upgrades.length > 0 ? (
+                <>
+                  B 换了 <b style={{ color: '#FBBF24' }}>{upgrades.length} 件</b>（合计{' '}
+                  <b style={{ color: '#FBBF24' }}>+{fmtUsd(upgradeSum)}</b>）
+                  <span style={{ color: '#6B7280' }}>
+                    　总价 A {fmtUsd(planA.total || 0)} → B {fmtUsd(planB.total || 0)}（差{' '}
+                    {delta >= 0 ? '+' : ''}{fmtUsd(delta)}
+                    {reconciled ? '，逐件合计 = 总价差，可逐条核对' : '，差额来自件数不同'}）
+                  </span>
+                </>
+              ) : (
+                <>
+                  两方案件件相同（{fmtUsd(planA.total || 0)}）
+                  <span style={{ color: '#6B7280' }}>
+                    　B 的同品类里没有匹配分更高的候选，所以升级为空（不是 B 更差，是本次候选池没有可换的东西）
+                  </span>
+                </>
+              )}
             </span>
             {recommendation && (
               <span style={{ fontSize: 11, color: '#C77DFF', background: '#1e1b4b', padding: '2px 8px', borderRadius: 99 }}>
@@ -419,6 +439,27 @@ function DiffView({ planA, planB, comparison }: {
               </span>
             )}
           </div>
+
+          {/* 逐件 diff 放在三栏之前：B 的每一件都是 A 同品类里更贵/更好的选择，
+              价差可逐件归因、也可以否决（说明 B 只贵在"这几件"上，不是整体乱配） */}
+          {upgrades.length > 0 && (
+            <div style={{ marginTop: 8, background: '#111827', borderRadius: 6, padding: 6 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#FBBF24', marginBottom: 4 }}>
+                ⬆️ 逐件替换（{upgrades.length} 项，合计 {fmtUsd(upgradeSum)}）
+              </div>
+              {upgrades.map((u, idx) => (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: '#D1D5DB', marginBottom: 2 }}>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {u.item ? `${u.item} → ${u.to_item || '同品类升级'}` : '同品类升级'}
+                    {u.category ? `　[${u.category}]` : ''}
+                  </span>
+                  <span style={{ color: '#FBBF24', flexShrink: 0 }}>
+                    {fmtUsd(u.from)} → {fmtUsd(u.to)}（+{fmtUsd(u.delta)}）
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* 对比标准（可复核）：把「凭什么这样比」写进 UI，而不是只给结论。
               同一候选池 + 两个目标函数（最低总价 / 最高关键词匹配分）+ 帕累托判定。 */}
@@ -446,25 +487,7 @@ function DiffView({ planA, planB, comparison }: {
             </div>
           )}
 
-          {/* 逐件升级：B 的每一件都是 A 同品类里更贵/更好的选择，价差可逐件归因、
-              也可以否决（说明 B 只贵在"这几件"上，不是整体乱配） */}
-          {upgrades.length > 0 && (
-            <div style={{ marginTop: 8, background: '#111827', borderRadius: 6, padding: 6 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#FBBF24', marginBottom: 4 }}>
-                ⬆️ 逐件升级（{upgrades.length} 项，合计 {fmtUsd(upgrades.reduce((s, u) => s + (u.delta || 0), 0))}）
-              </div>
-              {upgrades.map((u, idx) => (
-                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: '#D1D5DB', marginBottom: 2 }}>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {u.category ? `[${u.category}] ` : ''}{u.item || '同品类升级'}
-                  </span>
-                  <span style={{ color: '#FBBF24', flexShrink: 0 }}>
-                    {fmtUsd(u.from)} → {fmtUsd(u.to)}（+{fmtUsd(u.delta)}）
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+
         </div>
       )}
     </div>

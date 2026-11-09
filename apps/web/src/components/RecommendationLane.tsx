@@ -70,6 +70,16 @@ export function RecommendationLane({ sessionId, planA, planB, refreshKey = 0 }: 
     if (namesB.has(n)) return '已在方案 B'
     return '两方案都没有'
   }
+  /** 标签以后端 placement 为准（它能给出「为什么没进方案」），前端只做兜底。 */
+  const placementOf = (c: RecommendationCard): { label: string; reason: string } => {
+    if (c.placement === 'in_both') return { label: '已在方案 A/B', reason: c.placement_reason || '方案 A 与 B 都选了它' }
+    if (c.placement === 'in_a') return { label: '已在方案 A', reason: c.placement_reason || '方案 A（最低总价）里就是这件' }
+    if (c.placement === 'in_b') return { label: '已在方案 B', reason: c.placement_reason || '方案 B 把它作为同品类升级' }
+    if (c.placement === 'neither' || inPlan(c.name) === '两方案都没有') {
+      return { label: '两方案都没有', reason: c.placement_reason || '本次需求没有要求这个品类' }
+    }
+    return { label: inPlan(c.name), reason: c.placement_reason || '' }
+  }
 
   const handleAdd = async (c: RecommendationCard) => {
     setBusy(c.id)
@@ -130,7 +140,10 @@ export function RecommendationLane({ sessionId, planA, planB, refreshKey = 0 }: 
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
-          {data.items.map(c => (
+          {data.items.map(c => {
+            const tag = placementOf(c)
+            const outside = tag.label === '两方案都没有'
+            return (
             <div key={c.id} style={cardStyle}>
               <div style={{ fontSize: 11, color: '#E5E7EB', fontWeight: 600, lineHeight: 1.3, maxHeight: 30, overflow: 'hidden' }}>
                 {c.name}
@@ -142,13 +155,20 @@ export function RecommendationLane({ sessionId, planA, planB, refreshKey = 0 }: 
                     fontSize: 9,
                     padding: '1px 6px',
                     borderRadius: 99,
-                    color: inPlan(c.name) === '两方案都没有' ? '#C4B5FD' : '#34D399',
-                    background: inPlan(c.name) === '两方案都没有' ? '#2e1065' : '#052e16',
+                    color: outside ? '#C4B5FD' : '#34D399',
+                    background: outside ? '#2e1065' : '#052e16',
                   }}
                 >
-                  {inPlan(c.name)}
+                  {tag.label}
                 </span>
               </div>
+              {/* 「两方案都没有」是负面标签：不给原因就是在告诉评委"这件你也不会买"。
+                  补上被哪条规则排除，它才是"被考虑过、被规则排除"的选项。 */}
+              {outside && (
+                <div style={{ fontSize: 9, color: '#A78BFA', lineHeight: 1.4 }}>
+                  为什么没进方案：{tag.reason}
+                </div>
+              )}
               <div style={{ fontSize: 9, color: '#9CA3AF', lineHeight: 1.4, maxHeight: 26, overflow: 'hidden' }}>
                 {c.reason}
               </div>
@@ -169,7 +189,8 @@ export function RecommendationLane({ sessionId, planA, planB, refreshKey = 0 }: 
                 {busy === c.id ? '加购中…' : '加入购物车'}
               </button>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

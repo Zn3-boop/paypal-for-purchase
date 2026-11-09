@@ -100,7 +100,7 @@ A full-stack group-purchase agent on **PayPal sandbox** with five inspectable pa
 - `create_order` double-click → same PayPal token/approval URL, gateway called once.
 - Order archive/query probes: `session_id` required (422), cross-session access 403, foreign
   order id answered without leaking, polling stops once no order is `paying`.
-- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **147 passed**
+- Frontend `tsc -b` and `vite build` are green; backend `pytest -q` → **149 passed**
   (`tests/test_restart_persistence.py` covers restart recovery of the order archive and the audit
   timeline; `tests/test_comparison_criteria.py` pins the A/B criteria + Pareto verdict;
   `tests/test_search_memory.py` covers retrieval-memory dedupe and restart survival).

@@ -328,7 +328,15 @@ export interface PlansComparison {
   only_b_count?: number
   budget_limit?: number
   recommendation?: string
-  upgrades?: { item?: string; category?: string; from?: number; to?: number; delta?: number }[]
+  upgrades?: {
+    item?: string
+    to_item?: string
+    to_id?: string
+    category?: string
+    from?: number
+    to?: number
+    delta?: number
+  }[]
   /** 「凭什么这样比」：同一候选池 + 双目标（最低总价 / 最高关键词匹配分）。 */
   criteria?: ComparisonCriteria
   metrics?: ComparisonMetrics
@@ -444,6 +452,9 @@ export interface RecommendationCard {
   reason: string
   basis?: 'search' | 'selection' | 'anchor' | 'none'
   basis_value?: string
+  /** 与上方 A/B 的关系：in_a / in_b / in_both / neither（neither 必带 placement_reason）。 */
+  placement?: 'in_a' | 'in_b' | 'in_both' | 'neither'
+  placement_reason?: string
   source?: 'channel3'
 }
 

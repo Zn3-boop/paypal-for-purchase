@@ -778,6 +778,9 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
         upgrades.append(
             {
                 "item": base.get("name", ""),
+                # 替换成了哪一件：逐件 diff 要说清「换成了什么」，否则只能看到价格跳变
+                "to_item": it.get("name", ""),
+                "to_id": it.get("id", ""),
                 "category": base.get("category", ""),
                 "from": base.get("price", 0),
                 "to": it.get("price", 0),

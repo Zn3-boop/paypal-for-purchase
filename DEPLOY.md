@@ -112,7 +112,7 @@ PAYPAL_SANDBOX_SECRET=...
 
 ```bash
 cd apps/server
-python -m pytest -q        # 132 tests
+python -m pytest -q        # 149 tests
 ```
 
 Covered: payment-intent routing, authority verdicts (block / allow_auto / need_approval), HITL
@@ -138,7 +138,38 @@ The web app opens on **🛒 选购方案** (plans) and has two more panels: **�
    timeline and 🧠 检索记忆 all come back from disk. Only a pending PayPal approval URL is
    re-created, because that registry is in-memory.
 
-## 10. Submission requirements satisfied
+## 10. Recording discipline & pre-flight gates
+
+**Rehearsal and recording must not share a session.** The browser keeps the session id in
+`localStorage`, so any rehearsal click (e.g. adding a recommended item to the cart) stays in that
+session's audit timeline. Open `http://localhost:3000/?fresh=1` — that forces a brand-new session
+and clears the stored chat — for rehearsal, and open a **second, brand-new** session for the take.
+Then the timeline contains exactly the events the audience sees, which is what makes "13 events"
+a claim you can point at rather than a number you recite.
+
+**Two hard gates, both required** (after submitting one request and selecting one plan):
+
+```bash
+python scripts/preflight_demo.py --session-id <your-session-id>
+```
+
+1. `/api/v1/plans` must show **different** item sets for A and B **and** a non-empty
+   `comparison.upgrades`. B is "same category, higher `match_score`" over a Channel3 candidate
+   pool; if Channel3 is down, B degrades into a copy of A and the whole comparison narrative
+   collapses — that is the failure that cannot be filmed, not an empty recommendation strip.
+2. `/api/v1/recommendations` must be `status:"ok"` with **exactly 3** cards.
+
+Exit code 0 = clear to record, 1 = fix it first. The script is read-only.
+
+**Hosting decision (11-08).** This demo stays **clone-and-run**, not a public URL. The product's
+second pillar is restart-proof state, and every free-tier/ephemeral-disk host would silently break
+it (a container restart drops `data/`), turning the strongest claim into a false one in front of
+judges. `docker compose up --build` plus mock-first defaults give reviewers a one-command path with
+zero credentials, and the recorded video carries the walkthrough. Revisiting this is fine *only*
+with a persistent volume attached on the chosen host — otherwise the claim must be dropped from
+the video.
+
+## 11. Submission requirements satisfied
 
 - [ ] Public GitHub / Bitbucket / GitLab repository URL
 - [ ] MIT LICENSE at repo root (detectable on repository "About")

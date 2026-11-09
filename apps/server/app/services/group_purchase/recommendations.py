@@ -142,6 +142,83 @@ def _reason_for(item: dict[str, Any], signals: dict[str, Any]) -> tuple[str, str
     return "和最近一次需求的检索方向相近", "anchor", anchor
 
 
+def _plan_items(plan: Any) -> dict[str, dict[str, Any]]:
+    """把方案里的商品按归一化名建索引（plan 可能为 None：还没生成方案）。"""
+    out: dict[str, dict[str, Any]] = {}
+    for item in getattr(plan, "items", None) or []:
+        name = _norm_name(getattr(item, "name", ""))
+        if name:
+            out[name] = {
+                "name": str(getattr(item, "name", "") or ""),
+                "category": str(getattr(item, "category", "") or ""),
+                "price": float(getattr(item, "price", 0) or 0),
+            }
+    return out
+
+
+def _hard_budget(session: Any) -> float | None:
+    limits = [
+        float(c.numeric_value)
+        for c in (getattr(session, "constraints", None) or [])
+        if getattr(c, "type", "") == "budget" and getattr(c, "hard", False) and getattr(c, "numeric_value", None)
+    ]
+    return min(limits) if limits else None
+
+
+def _cheapest_plan_total(session: Any) -> float:
+    totals = [
+        float(getattr(plan, "total", 0) or 0)
+        for plan in (getattr(session, "plan_a", None), getattr(session, "plan_b", None))
+        if plan is not None
+    ]
+    totals = [t for t in totals if t > 0]
+    return min(totals) if totals else 0.0
+
+
+def _placement(item: dict[str, Any], session: Any) -> tuple[str, str]:
+    """这张卡与上方 A/B 的关系 + 「两方案都没有」时的可复核原因。
+
+    in_a / in_b / in_both / neither。neither 必须给原因，否则这张卡就是在告诉评委
+    「这件你也不会买」却不说为什么 —— 有了原因，它才是「被考虑过、被规则排除」的选项。
+    """
+    name = _norm_name(item.get("name") or item.get("title"))
+    in_a = _plan_items(getattr(session, "plan_a", None))
+    in_b = _plan_items(getattr(session, "plan_b", None))
+    if name and name in in_a and name in in_b:
+        return "in_both", "方案 A 与 B 都选了它"
+    if name and name in in_a:
+        return "in_a", "方案 A（最低总价）里就是这件"
+    if name and name in in_b:
+        return "in_b", "方案 B（最高匹配分）把它作为同品类升级"
+
+    price = float(item.get("price") or 0)
+    category = _norm_name(item.get("category"))
+    if category:
+        for mapping, label in ((in_a, "A"), (in_b, "B")):
+            for other in mapping.values():
+                if _norm_name(other["category"]) != category:
+                    continue
+                gap = price - other["price"]
+                if gap > 0:
+                    return "neither", (
+                        f"同品类已有更便宜的：方案 {label} 用 {other['name']} "
+                        f"${other['price']:.2f}，这件贵 ${gap:.2f}"
+                    )
+                return "neither", (
+                    f"同品类里方案 {label} 的 {other['name']} ${other['price']:.2f} "
+                    "匹配分更高（B 已按匹配分升级过）"
+                )
+
+    budget = _hard_budget(session)
+    base_total = _cheapest_plan_total(session)
+    if budget is not None and base_total > 0 and base_total + price > budget:
+        return "neither", (
+            f"加它会超预算：最便宜的方案 ${base_total:.2f} + 这件 ${price:.2f} = "
+            f"${base_total + price:.2f} > ${budget:.2f}"
+        )
+    return "neither", "本次需求没有要求这个品类，加进去只会挤掉更便宜的同类"
+
+
 def _prune_cache(session_id: str) -> None:
     now = time.monotonic()
     for key, value in list(_cache.items()):
@@ -246,6 +323,7 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
             tags = [str(t) for t in (it.get("tags") or [])][:8]
             price = round(float(it.get("price") or 0), 2)
             reason, basis, basis_value = _reason_for(it, signals)
+            placement, placement_reason = _placement(it, session)
             rec_id = f"rec-{idx + 1}"
             payload = {
                 "id": rec_id,
@@ -260,6 +338,9 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
                 "reason": reason,
                 "basis": basis,
                 "basis_value": basis_value,
+                # 与上方 A/B 的关系（in_a / in_b / in_both / neither）+ 排除原因
+                "placement": placement,
+                "placement_reason": placement_reason,
                 "source": "channel3",
             }
             items.append(payload)

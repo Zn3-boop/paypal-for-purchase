@@ -38,7 +38,9 @@ CHANNEL3_DISABLED = "disabled"
 
 # 响应缓存：5 分钟内同一 query 秒回（录制稳定的真正来源，且走真实代码路径）
 _CACHE: OrderedDict = OrderedDict()
-_CACHE_TTL = 300.0
+# 30 分钟：demo/录制窗口里「设备调试 + 开场口播」很容易超过 5 分钟，
+# 缓存太短会让 A/B 与推荐泳道在镜头前同时打空（demo 没有"数据太旧"的问题，只有"数据没了"）
+_CACHE_TTL = 1800.0
 _CACHE_MAX = 32
 
 _DEFAULT_TOTAL_TIMEOUT = 5.0
