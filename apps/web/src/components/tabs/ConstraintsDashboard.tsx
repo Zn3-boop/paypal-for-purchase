@@ -44,6 +44,9 @@ export function ConstraintsDashboard({ sessionId }: Props) {
             setConstraints(res.constraints?.filter(isActive) || [])
             setConflicts(res.conflicts || [])
           })
+          .catch(() => {
+            /* 孤儿 session 已由 api 层自动重建并重试；首次加载的 .catch 已统一报错，轮询不重复刷屏 */
+          })
       }
     }, 3000)
     return () => clearInterval(interval)

@@ -191,12 +191,39 @@ export function ensureSession(sessionId: string, userId = 'demo-user'): Promise<
   })()
 
   ensureInflight.set(sessionId, task)
-  task.catch(() => { ensureInflight.delete(sessionId) })
+  // 只用来合并"同一时刻的并发调用"，任务结束就清掉。
+  // 早期版本在成功后永久保留，导致后端重启、session 变成孤儿时这里一直返回"已建好"的旧结论，
+  // 面板轮询会永远 404（这就是 11-09 那次整屏 "Session not found" 的根因）。
+  task.then(
+    () => ensureInflight.delete(sessionId),
+    () => ensureInflight.delete(sessionId),
+  )
   return task
 }
 
+/**
+ * 后端重启会让 localStorage 里的 session id 变成孤儿：接口返回 404 + detail "Session not found"，
+ * 而面板每 3~5 秒轮询一次，于是整屏刷 404。这里识别这个特定 404，重建一次会话后重试，
+ * 让"开着页面重启后端"自愈，而不是要求用户手动刷新。
+ */
+function isSessionMissing(detail: unknown): boolean {
+  return typeof detail === 'string' && detail.trim() === 'Session not found'
+}
+
+async function withSessionRetry(sessionId: string, url: string): Promise<Response> {
+  const first = await fetch(url)
+  if (first.status !== 404) return first
+  const body = await first.clone().json().catch(() => null)
+  if (!isSessionMissing((body as { detail?: unknown } | null)?.detail)) return first
+  await ensureSession(sessionId)
+  return await fetch(url)
+}
+
 export async function fetchConstraints(sessionId: string): Promise<ConstraintsResponse> {
-  const resp = await fetch(`${API_BASE}/constraints?session_id=${encodeURIComponent(sessionId)}`)
+  const resp = await withSessionRetry(
+    sessionId,
+    `${API_BASE}/constraints?session_id=${encodeURIComponent(sessionId)}`,
+  )
   if (!resp.ok) {
     const body = await resp.json().catch(() => null)
     throw new Error(body?.detail || `Fetch constraints failed: ${resp.status}`)
@@ -556,7 +583,10 @@ export async function regeneratePlans(sessionId: string): Promise<{ ok: boolean;
 }
 
 export async function fetchPlans(sessionId: string): Promise<PlansResponse> {
-  const resp = await fetch(`${API_BASE}/plans?session_id=${encodeURIComponent(sessionId)}`)
+  const resp = await withSessionRetry(
+    sessionId,
+    `${API_BASE}/plans?session_id=${encodeURIComponent(sessionId)}`,
+  )
   if (!resp.ok) {
     const body = await resp.json().catch(() => null)
     throw new Error(body?.detail || `Fetch plans failed: ${resp.status}`)
@@ -625,7 +655,10 @@ export interface OrdersResponse {
 }
 
 export async function fetchOrders(sessionId: string): Promise<OrdersResponse> {
-  const resp = await fetch(`${API_BASE}/orders?session_id=${encodeURIComponent(sessionId)}`)
+  const resp = await withSessionRetry(
+    sessionId,
+    `${API_BASE}/orders?session_id=${encodeURIComponent(sessionId)}`,
+  )
   if (!resp.ok) {
     const body = await resp.json().catch(() => null)
     throw new Error(body?.detail || `Fetch orders failed: ${resp.status}`)
@@ -725,7 +758,8 @@ export interface AuditLogsResponse {
 }
 
 export async function fetchAuditLogs(sessionId: string, limit = 50): Promise<AuditLogsResponse> {
-  const resp = await fetch(
+  const resp = await withSessionRetry(
+    sessionId,
     `${API_BASE}/audit/logs?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`,
   )
   if (!resp.ok) {
