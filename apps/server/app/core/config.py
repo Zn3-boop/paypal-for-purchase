@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     channel3_language: str = ""
     channel3_country: str = ""
     channel3_currency: str = ""
+    # 演示机 DNS 可能被污染（网关把 api.trychannel3.com 的 AWS 记录解析成 127.0.0.1，
+    # 2026-11-10 实测时好时坏）。逗号分隔的固定 IP 列表：设置后在应用层绕过系统解析，
+    # TLS 的 SNI/Host/证书校验仍基于域名本身 —— 不改 hosts、不关校验、无需管理员权限。
+    channel3_dns_pin: str = ""
 
     # ---------- LLM (chat / agent replies) ----------
     llm_api_key: str = ""

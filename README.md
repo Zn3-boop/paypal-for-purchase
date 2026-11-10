@@ -129,7 +129,9 @@ shortcut to re-run a search, and a visible record that Channel3 is being used ac
 The 🧠 row only re-runs an old sentence. The ✨ **第三条泳道 · Channel3 推荐** strip under the A/B
 diff actually **searches again**: it takes the recent queries plus the items of the last selected
 plan as anchors, sends **one** real Channel3 query, filters it with the same relevance gate the
-planner uses, drops anything already in the cart or already picked, and shows at most three cards.
+planner uses, drops anything already in the cart or already picked, then re-ranks the survivors with
+**MMR** (λ·rel − (1−λ)·sim-to-A∪B, λ=0.6) and shows at most three cards. Sorting and per-card
+reason come from pure functions with a judgment line each (see 规格 B/C below), not from a model.
 
 Each card carries a source a judge can verify instead of a label:
 
@@ -158,6 +160,95 @@ writes the existing `cart_modified` audit event with
 `golden_path_verify.py` stay valid. If Channel3 is unavailable you get an empty list plus a
 `disabled`/`error` status, never local-catalog items dressed up as recommendations
 (`tests/test_recommendations.py`).
+
+### 演示机 DNS 污染：应用层 pin，而不是 hosts / 换网络 / replay
+
+2026-11-10 实测：演示机（受限网络）的网关 DNS 把 `api.trychannel3.com` 的 CNAME 目标
+（`d-aklj24vug8.execute-api.us-east-1.amazonaws.com`）解析成 `127.0.0.1` 且时好时坏 ——
+所以症状是「DNS 解析失败」与「连接失败」同时出现。诊断判据：`nslookup <域名> 8.8.8.8`
+能拿到真实 AWS IP，且 `curl --resolve api.trychannel3.com:443:<IP> https://api.trychannel3.com/`
+返回 200 → 服务端正常、出网正常（PayPal 沙盒 401 为对照组），**只是本机 DNS 被污染**。
+
+解法刻意选**应用层 DNS pin** 而不是改 hosts 或做 replay：
+
+- 无需管理员权限（录制机实测 `IS_ADMIN=False`，hosts 写不了）；
+- 不关 TLS 校验：URL 仍是 `api.trychannel3.com`，SNI / Host / 证书校验全部照旧，
+  只是 connect 阶段的目标 IP 固定为 `CHANNEL3_DNS_PIN` 里的真实地址；
+- 影响面最小：只 pin `api.trychannel3.com` 与其 CNAME 目标两个名字，PayPal/LLM 等不受影响；
+- 是「故障定位后的工程修复」，不是「用快照掩盖故障」—— 事件表与审计语义不变。
+
+用法：`apps/server/.env` 设置 `CHANNEL3_DNS_PIN=3.212.207.12,...`（逗号分隔）；换到正常网络清空即可。
+回归：`tests/test_channel3_client_resilience.py::test_dns_pin_pins_api_host_and_ignores_non_pin_hosts`。
+
+### 规格 B/C：MMR 重排 + 每张卡一个可复算原因码
+
+泳道的**排序**和**理由**都不是模型黑盒 —— 判定式全是纯函数，README 各一行：
+
+```
+rel(c)   = min(1, |tokens(c) ∩ 本次检索锚点| / 4)      # 绝对相关度 [0,1]，先过 floor
+floor:   rel(c) < 0.25 → 不进入候选
+score(c) = λ·rel(c) − (1−λ)·max_{s∈S} sim(c,s)          # λ=0.6，贪心逐张取
+sim(c,s) = 1 − tier(c,s) / 6                            # S = 方案 A∪B ∪ 已选推荐卡
+```
+
+- `rel` 的锚点只来自**本次检索**（意图句 + 最近一条本会话搜索），不含已选商品名 ——
+  选品是方案侧信号，混进来会让「复读方案」看起来像「贴近历史」（会话隔离回归：
+  `tests/test_recommendations.py::test_other_sessions_do_not_poison_my_recommendation_query`）。
+- floor 施加在**归一化之前**的绝对相关度上（`minmax` 只在打分尺度上做）：两个候选时
+  最小值会被归一化成 0，在归一化之后 floor 会把第二名误杀。
+- `sim` 来自替代分级而不是文本相似度：cross-genre 的两张 vinyl 标题都含
+  "vinyl/record"，文本相似度把它们罚成「重复」，tier 不会。
+
+每张卡带 `reason_code`（主码）+ `reason_code_secondary`（至多一个辅码）+
+`reason_code_text`。判定按固定优先级取第一个命中，源码在
+`apps/server/app/services/group_purchase/reason_codes.py`：
+
+| code | 判定式（一行） |
+|---|---|
+| `FILLS_CATEGORY_GAP` | rel ≥ 0.25 且 item 品类 ∉ A∪B 的品类集合 |
+| `CHEAPER_ALTERNATIVE` | 与方案里某件 tier ≤ T4 且价格更低（省最多那件） |
+| `SAME_RELEASE_OTHER_EDITION` | 与方案里某件 tier == T1（同款不同规格，未更便宜） |
+| `SAME_ARTIST` | 与方案里某件 tier ∈ {T2, T3}（同品牌/同艺人，同类型） |
+| `SAME_GENRE` | 与方案里某件 tier ∈ {T4, T5}（同类型，不同品牌） |
+| `HISTORY_DIRECTION` | 以上都不中但 rel ≥ 0.25（同方向，不是同款） |
+| `""` | rel < 0.25 或无方案可依 → 不给码（这张卡本就不该出现） |
+
+**不伪造条款**：解析不出品牌/类型（tier 落到 T6）时绝不产出 `SAME_ARTIST` /
+`SAME_GENRE`，直接降到 `HISTORY_DIRECTION` 或空码；tier=0（同一件）且更便宜时主码必须
+是 `CHEAPER_ALTERNATIVE` ——「同一件」不是「另一个版本」。`relevance` 字段就是上面的
+rel；`HISTORY_DIRECTION` / `SAME_GENRE` 会是大多数卡的主码（推荐的本质是「同方向」），
+UI 因此从不暗示「这张更值得买」。回归：`tests/test_mmr.py`、`tests/test_reason_codes.py`。
+
+`scripts/preflight_demo.py` 把这些当成开录硬门：3 张卡都带 `reason_code`、每卡 rel ≥ 0.25、
+`relevance_reselect` 模式下 `upgrades` 必须为空、`substitution` 模式下每项替换 tier ≤ T3。
+
+### 订单超时：为什么是「惰性判定」而不是 Redis TTL
+
+`paying` 订单带 `expires_at`（进入 paying 时写入，默认 30 分钟，`ORDER_PAYING_TTL_SECONDS` 可覆盖）。
+读接口（`GET /orders`、`GET /orders/{id}`、`GET /orders/{id}/status`，以及 PayPal 回跳兜底）每次访问时
+顺手判断：**paying 且已越过 `expires_at` → `paying → expired`，并写一条 `order_status_changed`
+审计事件**（`actor=lazy_expiry`，reason 带 `expires_at` 与 TTL）。没有定时器，没有后台循环。
+
+| 方案 | 为什么不用 |
+|---|---|
+| Redis TTL + keyspace notification | 要引入 Redis 依赖；且通知是 fire-and-forget —— 订阅者掉线期间的过期事件永久丢失，还得多维护一个消费者。比「读的时候顺手判一次」多出连接、订阅、重连、丢事件四类故障点。 |
+| ZSet 延时队列 / 定时扫描 | 需要常驻调度器 + 分布式锁 + 重复消费处理；本项目的订单量下收益为 0，新增的故障点却是一整类。 |
+| RabbitMQ 死信队列（DLX） | 为一个 30 分钟超时引入消息中间件，是用生产级基础设施解决演示级问题。 |
+| 时间轮 | 内存态定时器，重启即丢；与「订单档案已落盘」的事实不一致。 |
+
+**代价（一行）**：没人访问的过期订单不会立刻过期 —— 它在下一次读（列表 / 详情 / 轮询 / 回跳）时才迁移。
+系统不占库存、不锁资金，所以这个延迟只影响展示，不影响正确性。
+
+**收益**：过期是一个**可复核的状态转移**（有审计事件、有 reason、前端可见），而不是「一个 Redis key
+悄悄消失」。评委可以沿着审计时间轴逐条回放「这单什么时候、为什么变成过期」。
+
+**外部事实优先**：`expired` 不是终局的本地断言，只是时间推断。若 PayPal 回跳 `capture=COMPLETED`，
+订单走 `expired → paid`（状态机里 `expired → {paid}` 是唯一允许的「倒流」入口），审计 reason 明确写
+「本地判定已过期，但 PayPal capture 已完成（金额 X），以支付事实为准」，并落机器可读原因码
+`reason_code="remote_completed_after_local_expiry"` —— Q&A 可直接 grep 审计流水复算
+「本地推断被外部事实推翻」这个时刻。D2 金额副门仍然生效 —— 金额不一致绝不落 `paid`。同理，启动对账
+（`reconcile_sessions_on_startup`）优先采信审计里的 `payment_completed`，不会被惰性过期抢先标记。
+回归：`tests/test_order_expiry.py`。
 
 ## What is deliberately demo-grade (honest limitations)
 
@@ -256,6 +347,8 @@ demonstrates real restart-proof persistence rather than a page reload. Before fi
 | `PAYPAL_MODE` | `sandbox` | `sandbox` for demo |
 | `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET` | - | merchant app credentials from the PayPal Developer Dashboard (Business account); required only for `PAYMENT_MODE=real` |
 | `PAYPAL_SANDBOX_API` | `https://api-m.sandbox.paypal.com` | sandbox API base |
+| `CHANNEL3_API_KEY` | - | Channel3 real product search; empty → honest fallback to local `catalog_k1` |
+| `CHANNEL3_DNS_PIN` | (empty) | 演示机 DNS 被污染时的应急：逗号分隔的真实 IP 列表，应用层固定 connect 目标（TLS/SNI/Host 仍按域名校验，不关校验、无需管理员权限）；正常网络留空 |
 
 ## Real Mode (for judges)
 
@@ -317,16 +410,18 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 149 tests
+python -m pytest -q        # 179 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
 need_approval), the HITL interrupt gate, approve / reject / modify end-to-end flows
 (create -> capture -> explain -> trust write-back), mock vs real payment clients, HTTP API
 serialization, capture-failure hardening, plan-snapshot staleness, A/B comparison criteria +
-Pareto verdicts, Channel3 retrieval memory, and restart persistence
-(`tests/test_restart_persistence.py`: orders + audit timeline are rebuilt from JSONL after a
-cold start).
+Pareto verdicts, Channel3 retrieval memory, MMR re-ranking + per-card reason codes
+(`tests/test_mmr.py`, `tests/test_reason_codes.py`, `tests/test_plan_upgrades.py`),
+payment-window lazy expiry + external-fact override (`tests/test_order_expiry.py`), and restart
+persistence (`tests/test_restart_persistence.py`: orders + audit timeline are rebuilt from JSONL
+after a cold start).
 
 ## License
 

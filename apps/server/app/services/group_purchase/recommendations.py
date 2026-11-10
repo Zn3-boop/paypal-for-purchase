@@ -19,6 +19,14 @@
 出处可复算：响应里的每个推荐都带 `basis`（哪次检索/哪个已选方案）、`query_used`
 （实际发给 Channel3 的词）和 `search_hits`（该检索命中总数）。评委拿 `query_used`
 自己搜一遍应该能得到相似候选 —— 出处不是装饰文字。
+
+选品与解释（规格 B / C，两处都可复算）：
+  - **MMR**（Carbonell & Goldstein 1998）：rel 归一化后取 `λ·rel − (1−λ)·max_sim`，
+    sim 由替代分级反推（1 − tier/6），S = 方案 A∪B + 已选卡 —— 「最贴你历史、
+    又最不像方案里已有」的三件，而不是分最高的三件；
+  - **reason codes**：一卡一个主码（FILLS_CATEGORY_GAP > CHEAPER_ALTERNATIVE >
+    SAME_RELEASE_OTHER_EDITION > SAME_ARTIST > SAME_GENRE > HISTORY_DIRECTION），
+    判定全是纯函数，README 每个码一行判定式。
 """
 from __future__ import annotations
 
@@ -28,10 +36,10 @@ import threading
 import time
 from typing import Any
 
+from app.services.group_purchase import mmr, reason_codes
 from app.services.group_purchase.budget_guardrail import check_budget
 from app.services.group_purchase.planner import (
     _is_relevant_item,
-    _overlap_score,
     _query_tokens,
     build_search_query,
 )
@@ -72,9 +80,22 @@ def _item_text(item: dict[str, Any]) -> str:
 
 
 def collect_signals(session: Any) -> dict[str, Any]:
-    """把「搜过 / 选过」整理成可展示、可追溯的信号（全部来自落盘记忆）。"""
-    searches = recent_searches(5)
-    selections = recent_selections(3)
+    """把「搜过 / 选过」整理成可展示、可追溯的信号（全部来自落盘记忆）。
+
+    锚点纪律（「推荐泳道为什么不会串味」的根）：
+      - 只认**本会话**的检索/选择记录；跨会话记忆只出现在记忆条里做展示，
+        不参与本次 Channel3 查询（否则「买黑胶」会被别的会话的「买水壶」淹没）。
+      - Channel3 查询只锚定「当前需求原句 + 本会话最近一次检索」，
+        不把整段历史擀成一条关键词汤 —— 收录最多的品类（如 218 件的水壶）
+        会淹没真正的意图，query_used 也会变成不可复算的拼接句。
+    """
+    session_id = str(getattr(session, "session_id", "") or "").strip()
+    searches = [
+        r for r in recent_searches(8) if str(r.get("session_id") or "") == session_id
+    ]
+    selections = [
+        r for r in recent_selections(5) if str(r.get("session_id") or "") == session_id
+    ]
 
     selected_items: list[str] = []
     for row in selections[:2]:
@@ -87,31 +108,32 @@ def collect_signals(session: Any) -> dict[str, Any]:
     query = str(getattr(session, "intent_query", "") or "").strip()
     if query:
         anchor_texts.append(query)
-    for row in searches[:2]:
-        anchor_texts.append(str(row.get("query") or ""))
-    latest = selections[0] if selections else None
-    if latest:
-        anchor_texts.append(str(latest.get("query") or ""))
-    if selected_items:
-        anchor_texts.append(" ".join(selected_items[:3]))
-    # 去重但保持「越新越靠前」的顺序
-    anchor_texts = [t for t in dict.fromkeys(t.strip() for t in anchor_texts) if t]
+    # 只取最近一次（且与本会话原句不同）的检索作为补充锚；更早的检索仅是展示信号。
+    for row in searches[:1]:
+        q = str(row.get("query") or "").strip()
+        if q and q not in anchor_texts:
+            anchor_texts.append(q)
 
     return {
         "recent_searches": [
-            {"query": r["query"], "count": int(r.get("count") or 1), "ts": r.get("ts")}
+            {
+                "query": r["query"],
+                "count": int(r.get("count") or 1),
+                "ts": r.get("ts"),
+                "session_id": str(r.get("session_id") or ""),
+            }
             for r in searches[:3]
         ],
         "last_selection": (
             {
-                "plan_id": latest.get("plan_id"),
-                "total": latest.get("total"),
-                "item_count": latest.get("item_count"),
-                "items": list(latest.get("items") or [])[:5],
-                "query": latest.get("query") or "",
-                "ts": latest.get("ts"),
+                "plan_id": selections[0].get("plan_id"),
+                "total": selections[0].get("total"),
+                "item_count": selections[0].get("item_count"),
+                "items": list(selections[0].get("items") or [])[:5],
+                "query": selections[0].get("query") or "",
+                "ts": selections[0].get("ts"),
             }
-            if latest
+            if selections
             else None
         ),
         "selected_items": selected_items[:6],
@@ -153,6 +175,24 @@ def _plan_items(plan: Any) -> dict[str, dict[str, Any]]:
                 "category": str(getattr(item, "category", "") or ""),
                 "price": float(getattr(item, "price", 0) or 0),
             }
+    return out
+
+
+def _plan_dicts(session: Any) -> list[dict[str, Any]]:
+    """A∪B 的商品（dict 形态）：MMR 的 S 与 reason code 的「方案里那件」共用这一份。"""
+    out: list[dict[str, Any]] = []
+    for plan in (getattr(session, "plan_a", None), getattr(session, "plan_b", None)):
+        for item in getattr(plan, "items", None) or []:
+            name = str(getattr(item, "name", "") or "").strip()
+            if not name:
+                continue
+            out.append({
+                "name": name,
+                "title": name,
+                "category": str(getattr(item, "category", "") or ""),
+                "price": float(getattr(item, "price", 0) or 0),
+                "tags": list(getattr(item, "tags", []) or []),
+            })
     return out
 
 
@@ -297,12 +337,15 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
         exclude |= {_norm_name(i.name) for i in session.get_latest_cart()}
 
     anchor_tokens = set(anchors) | _query_tokens(anchor_text)
+    # MMR / reason code 的相关度只认「本次检索锚点」，不掺已选商品名（那是方案侧信号）
+    rel_tokens = set(anchor_tokens)
     if signals["selected_items"]:
         anchor_tokens |= _query_tokens(" ".join(signals["selected_items"]))
 
-    picked: list[dict[str, Any]] = []
+    # 候选池：去重 + 排除已在购物车/已选过的商品 —— 推荐的意义是「新方向」，不是复读。
+    pool: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
-    for it in sorted(raw, key=lambda x: _overlap_score(x, anchor_tokens), reverse=True):
+    for it in raw:
         name = str(it.get("name") or it.get("title") or "").strip()
         if not name:
             continue
@@ -310,9 +353,22 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
         if key in seen or key[0] in exclude:
             continue
         seen.add(key)
-        picked.append(it)
-        if len(picked) >= limit:
-            break
+        pool.append(it)
+
+    # 规格 B（MMR）：先在**绝对相关度**上过 relevance floor（rel ≥ 0.25），
+    # 再 minmax 归一化交给 λ 打分；否则「两个候选时最小值必为 0」会被 floor 误杀。
+    # 同时解决两个老 bug：推荐了已在方案 B 里的那件（sim=1 被压到底）、三张卡彼此重复。
+    plan_dicts = _plan_dicts(session)
+    rels_raw = [reason_codes.relevance(it, rel_tokens) for it in pool]
+    kept = [(c, r) for c, r in zip(pool, rels_raw) if r >= reason_codes.MIN_RELEVANCE]
+    picked = mmr.mmr_select(
+        [c for c, _ in kept],
+        mmr.minmax([r for _, r in kept]),
+        k=limit,
+        base_items=plan_dicts,
+        min_rel=0.0,  # floor 已在绝对相关度上施加
+    )
+    history_text = str((signals["recent_searches"] or [{}])[0].get("query") or "")
 
     items: list[dict[str, Any]] = []
     with _cache_lock:
@@ -324,6 +380,10 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
             price = round(float(it.get("price") or 0), 2)
             reason, basis, basis_value = _reason_for(it, signals)
             placement, placement_reason = _placement(it, session)
+            # 规格 C：一卡一个主码 + 至多一个辅码，判定纯函数（不碰模型）
+            rc = reason_codes.classify(
+                it, plan_items=plan_dicts, anchor_tokens=rel_tokens, history_text=history_text,
+            )
             rec_id = f"rec-{idx + 1}"
             payload = {
                 "id": rec_id,
@@ -338,6 +398,11 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
                 "reason": reason,
                 "basis": basis,
                 "basis_value": basis_value,
+                # 原因码：主码 + 辅码 + 一句可复核的人话；rel 是归一化相关度 [0,1]
+                "reason_code": rc["code"],
+                "reason_code_secondary": rc["secondary"],
+                "reason_code_text": rc["text"],
+                "relevance": rc["rel"],
                 # 与上方 A/B 的关系（in_a / in_b / in_both / neither）+ 排除原因
                 "placement": placement,
                 "placement_reason": placement_reason,
@@ -350,6 +415,11 @@ async def build_recommendations(session: Any, limit: int = 3) -> dict[str, Any]:
     note = ""
     if not items and status == "empty":
         note = "Channel3 这次没有返回与你历史需求相关的商品（换个说法再搜一次即可）。"
+    elif not items and raw:
+        note = (
+            "命中的商品与本次检索都不够贴近（rel < 0.25 或全被 MMR 淘汰）："
+            "宁可不给推荐，也不给无关卡片。"
+        )
 
     return {
         "items": items,

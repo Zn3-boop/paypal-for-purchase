@@ -30,6 +30,7 @@ STATUS_LABEL: dict[str, str] = {
     "paying": "支付中",
     "paid": "已支付",
     "cancelled": "已取消",
+    "expired": "已超时（支付窗口已过）",
 }
 
 

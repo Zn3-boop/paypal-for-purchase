@@ -364,10 +364,13 @@ def log_order_status_changed(
     from_status: str,
     to_status: str,
     reason: str | None = None,
+    reason_code: str | None = None,
 ) -> AuditLogEntry:
     """写 order_status_changed 审计事件（第 9 个埋点，H1 状态机转移时调用）。
 
-    data 携带 from_status / to_status / reason，是订单生命周期的时间轴证据。
+    data 携带 from_status / to_status / reason / reason_code，是订单生命周期的时间轴证据。
+    reason_code 是机器可读原因码（如 expired→paid 的
+    ``remote_completed_after_local_expiry``），供回放/grep 复算「本地推断被外部事实推翻」。
     """
     logger = get_audit_logger()
     return logger.log(
@@ -380,6 +383,7 @@ def log_order_status_changed(
             "from_status": from_status,
             "to_status": to_status,
             "reason": reason,
+            "reason_code": reason_code,
         },
     )
 

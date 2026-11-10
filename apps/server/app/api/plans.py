@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.services.group_purchase.planner import generate_dual_plans
 from app.services.group_purchase.session_state import get_session, update_session
 from app.services.group_purchase.budget_guardrail import check_budget
+from app.services.group_purchase.satisfaction import evaluate as evaluate_satisfaction
 from app.services.group_purchase.audit_log import (
     log_plan_generation,
     log_budget_violation,
@@ -296,6 +297,11 @@ async def list_plans(session_id: str = Query(...)):
             "risks": plan_a_raw.get("risks", []),
             "source": plan_a_raw.get("source", "k1_catalog"),
         }
+        # 满足度总账（纯计算）：组合级 N/M 条 + 逐条 ✅/❌/❔ + 证据串。
+        # 快照回放时随 payload 一起回放，无需重算。
+        plan_a_data["satisfaction"] = evaluate_satisfaction(
+            constraints, plan_a_data["items"], budget_limit=budget_limit,
+        )
         
         # Budget guardrail check for Plan A
         if budget_limit and plan_a_data["items"]:
@@ -337,6 +343,9 @@ async def list_plans(session_id: str = Query(...)):
             "risks": plan_b_raw.get("risks", []),
             "source": plan_b_raw.get("source", "k1_catalog"),
         }
+        plan_b_data["satisfaction"] = evaluate_satisfaction(
+            constraints, plan_b_data["items"], budget_limit=budget_limit,
+        )
         
         if budget_limit and plan_b_data["items"]:
             guardrail_b = check_budget(

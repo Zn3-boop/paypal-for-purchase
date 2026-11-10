@@ -53,3 +53,20 @@ def _isolate_audit_store(tmp_path, monkeypatch):
     _al._global_logger = None
     yield
     _al._global_logger = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_order_store(tmp_path, monkeypatch):
+    """Give every test a fresh order JSONL store and an empty in-memory registry.
+
+    `_orders` is a process-wide dict; without clearing it, an order left in
+    `paying` by one test would be visible (and lazily expired) in the next one.
+    `ORDER_STORE_DIR` is read on every write, so a per-test tmp_path keeps
+    expiry-regression tests from appending to the repo's `data/orders`.
+    """
+    from app.services.group_purchase import order_lifecycle as _ol
+
+    monkeypatch.setenv("ORDER_STORE_DIR", str(tmp_path / "orders"))
+    _ol._orders.clear()
+    yield
+    _ol._orders.clear()

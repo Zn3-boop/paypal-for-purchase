@@ -185,18 +185,28 @@ def test_comparison_shares_items_and_has_no_noop_upgrades(client, channel3_stub)
     assert {it["id"] for it in plans["B"]["items"]} <= stub_ids
 
     comparison = payload["comparison"]
-    assert comparison["shared_count"] >= 1, comparison
-    # 恒等式：shared = |A| - only_A = |B| - only_B（数字必须自洽）
+    mode = comparison["criteria"]["selection_mode_b"]
+    assert mode in {"substitution", "relevance_reselect"}, comparison["criteria"]
+    # 恒等式：无论哪种选品方式，件数都必须自洽
     assert comparison["shared_count"] == (
         comparison["item_count_a"] - comparison["only_a_count"]
     )
     assert comparison["shared_count"] == (
         comparison["item_count_b"] - comparison["only_b_count"]
     )
-    # 逐件升级不得出现「同价换同价」的 0 价差噪声
-    for up in comparison["upgrades"]:
-        assert up["delta"] != 0, up
-        assert up["delta"] == round(up["to"] - up["from"], 2), up
+
+    if mode == "substitution":
+        # 只换同款/同品牌：交集真实存在、替换 ≤ 3 件、每件都带 tier
+        assert comparison["shared_count"] >= 1, comparison
+        assert len(comparison["upgrades"]) <= 3, comparison["upgrades"]
+        for up in comparison["upgrades"]:
+            assert up["delta"] != 0, up
+            assert up["delta"] == round(up["to"] - up["from"], 2), up
+            assert up["tier"] is not None and up["tier"] <= 3, up
+    else:
+        # 没有可辩护替换 → 不得出现任何「替换」叙事
+        assert comparison["upgrades"] == [], comparison["upgrades"]
+        assert "没有做替换" in comparison["recommendation"]
 
 
 # ---------------------------------------------------------------- 支付留痕

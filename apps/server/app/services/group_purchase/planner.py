@@ -15,9 +15,21 @@ from typing import Any, Literal
 from app.services.group_purchase.budget_guardrail import calc_total
 from app.services.group_purchase.constraints import Constraint
 from app.services.group_purchase.fallback import generate_fallback_message
+from app.services.group_purchase.satisfaction import item_satisfies
 from app.services.shopper.catalog_k1 import get_k1_items
+from app.services.group_purchase.tiering import (
+    MAX_TOTAL_UPLIFT,
+    MAX_UPGRADE_TIER,
+    price_uplift_ok,
+    substitution_tier,
+    tier_label,
+)
 
 logger = logging.getLogger(__name__)
+
+# B 最多替换 A 的几件。旧行为是「每个槽位都换」：只要同品类有匹配分更高的候选就替换，
+# 于是 B 必然变成「另一批更贵的货」（8/8 全换、交集 0 件），读起来像换货而不是局部升级。
+DEFAULT_MAX_UPGRADES = 3
 
 # 关键词抽取辅助
 _NEGATION_WORDS = ("不要", "不用", "拒绝", "禁止", "不能", "别用", "不含", "无", "避免", "no ", "without ")
@@ -351,7 +363,11 @@ async def generate_dual_plans(
         "plan_a": plan_a,
         "plan_b": plan_b,
         "source": source,
-        "comparison": _compare_plans(plan_a, plan_b, budget_limit),
+        # 只有「同池升级」模式才谈替换上限；本地兜底目录是两套独立策略，不存在替换。
+        "comparison": _compare_plans(
+            plan_a, plan_b, budget_limit,
+            max_upgrades=DEFAULT_MAX_UPGRADES if share_basis else None,
+        ),
         "retrieval": _retrieval_meta(
             intent_query, source, catalog, filtered,
             search_query, retrieval_note, nearest, channel3_status,
@@ -411,22 +427,73 @@ def _retrieval_meta(
     }
 
 
+def _select_independent(
+    *,
+    candidates: list[dict[str, Any]],
+    strategy: Literal["cheap", "relevance"],
+    relevance: dict[str, dict[str, Any]],
+    budget_limit: float | None,
+    max_items: int | None,
+    min_items: int,
+) -> tuple[list[dict[str, Any]], float]:
+    """独立选品（不以 A 为底座）：A 按价格从低到高，B 按关键词匹配分从高到低。"""
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: (
+            float(c.get("price", 0) or 0) if strategy == "cheap"
+            else -float(relevance.get(c["id"], {}).get("score", 0))
+        ),
+    )
+
+    selected: list[dict[str, Any]] = []
+    spent = 0.0
+    limit = max_items if max_items is not None else len(candidates)
+
+    for item in sorted_candidates:
+        price = item.get("price", 0)
+        if budget_limit is not None and spent + price > budget_limit:
+            continue
+        selected.append(item)
+        spent += price
+        if len(selected) >= limit:
+            break
+
+    # 若商品太少，尝试补充最便宜的
+    if len(selected) < min_items:
+        selected_ids = {it["id"] for it in selected}
+        for item in sorted(candidates, key=lambda c: c.get("price", 0)):
+            if item["id"] in selected_ids:
+                continue
+            price = item.get("price", 0)
+            if budget_limit is not None and spent + price > budget_limit:
+                continue
+            selected.append(item)
+            spent += price
+            selected_ids.add(item["id"])
+            if len(selected) >= min_items:
+                break
+
+    return selected, spent
+
+
 def _assemble_strategy_plan(
     candidates: list[dict[str, Any]],
     strategy: Literal["cheap", "relevance"],
     budget_limit: float | None,
     constraints: list[Constraint],
-    max_items: int = 8,
+    max_items: int | None = 8,
     min_items: int = 3,
     intent_query: str = "",
     share_basis: bool = False,
     basis_items: list[dict[str, Any]] | None = None,
+    max_upgrades: int | None = DEFAULT_MAX_UPGRADES,
 ) -> dict[str, Any]:
     """A 按价格排序；B 按关键词证据排序。价格高低不代表耐用或质量。
 
     share_basis=True 时（Channel3 候选），B 不再另起一篮，而是拿 A 的每一件
-    做「同品类升级」：同品类里关键词匹配分更高的候选替换它；没有更好候选就原样保留。
-    这样 diff 视图里「共有商品」是真实存在的，两方案的价差也能逐件归因。
+    做「同品类升级」：同品类里关键词匹配分**严格更高**的候选替换它；没有更好候选
+    就原样保留，且最多替换 max_upgrades 件。这样 diff 视图里「共有商品」是真实存在的，
+    两方案的价差也能逐件归因。
     """
     from app.services.shopper.ranker import rank_candidates
 
@@ -440,7 +507,9 @@ def _assemble_strategy_plan(
     )
     relevance = {item["id"]: item for item in ranked}
 
+    selection_mode = "independent"
     if share_basis and basis_items:
+        selection_mode = "substitution"
         selected, spent = _upgrade_basis_items(
             basis_items=basis_items,
             candidates=candidates,
@@ -448,42 +517,30 @@ def _assemble_strategy_plan(
             budget_limit=budget_limit,
             max_items=max_items,
             min_items=min_items,
+            max_upgrades=max_upgrades,
+            basis_total=sum(float(it.get("price", 0) or 0) for it in basis_items),
         )
+        if [it.get("id") for it in selected] == [it.get("id") for it in basis_items]:
+            # 没有任何「可辩护的替换」（T0–T3 + 价格硬门）时，绝不假装升级：
+            # B 退化为同一候选池里按匹配分独立重排，并把这个事实写进 payload。
+            selection_mode = "relevance_reselect"
+            selected, spent = _select_independent(
+                candidates=candidates,
+                strategy="relevance",
+                relevance=relevance,
+                budget_limit=budget_limit,
+                max_items=max_items,
+                min_items=min_items,
+            )
     else:
-        sorted_candidates = sorted(
-            candidates,
-            key=lambda c: (
-                float(c.get("price", 0) or 0) if strategy == "cheap"
-                else -float(relevance.get(c["id"], {}).get("score", 0))
-            ),
+        selected, spent = _select_independent(
+            candidates=candidates,
+            strategy=strategy,
+            relevance=relevance,
+            budget_limit=budget_limit,
+            max_items=max_items,
+            min_items=min_items,
         )
-
-        selected: list[dict[str, Any]] = []
-        spent = 0.0
-
-        for item in sorted_candidates:
-            price = item.get("price", 0)
-            if budget_limit is not None and spent + price > budget_limit:
-                continue
-            selected.append(item)
-            spent += price
-            if len(selected) >= max_items:
-                break
-
-        # 若商品太少，尝试补充最便宜的
-        if len(selected) < min_items:
-            selected_ids = {it["id"] for it in selected}
-            for item in sorted(candidates, key=lambda c: c.get("price", 0)):
-                if item["id"] in selected_ids:
-                    continue
-                price = item.get("price", 0)
-                if budget_limit is not None and spent + price > budget_limit:
-                    continue
-                selected.append(item)
-                spent += price
-                selected_ids.add(item["id"])
-                if len(selected) >= min_items:
-                    break
 
     # 构建 PlanItem 列表
     items = []
@@ -503,9 +560,23 @@ def _assemble_strategy_plan(
             "match_score": relevance.get(item["id"], {}).get("score", 0),
             "match_tags": relevance.get(item["id"], {}).get("match_tags", []),
             "rationale": relevance.get(item["id"], {}).get("rationale", "该方案按价格从低到高选择" if strategy == "cheap" else "暂无直接关键词匹配证据"),
+            # 替换分级（只有 B 的替换件才有）：tier + 解析依据，UI 一行、README 可复算
+            "substitution_tier": item.get("_substitution_tier"),
+            "substitution_tier_label": (
+                tier_label(item["_substitution_tier"])
+                if item.get("_substitution_tier") is not None else None
+            ),
+            "substitution_basis": item.get("_substitution_basis"),
         })
 
     total = calc_total(items)
+
+    # 逐件「满足了哪几条」：这里曾长期硬编码 [] —— 前端「共 0 条」就是这么来的。
+    for item in items:
+        item["matched_constraints"] = [
+            c.id for c in constraints
+            if c.status == "active" and item_satisfies(c, item)
+        ]
 
     matched = []
     unmet = []
@@ -523,6 +594,8 @@ def _assemble_strategy_plan(
     return {
         "plan_id": plan_id,
         "strategy": strategy_name,
+        # 选品方式：independent（独立排序）/ substitution（A 的同款升级）/ relevance_reselect（无可辩护替换 → 独立重排）
+        "selection_mode": selection_mode,
         "items": items,
         "total": round(total, 2),
         "currency": "USD",
@@ -549,14 +622,17 @@ def _upgrade_basis_items(
     candidates: list[dict[str, Any]],
     relevance: dict[str, dict[str, Any]],
     budget_limit: float | None,
-    max_items: int,
+    max_items: int | None,
     min_items: int = 1,
+    max_upgrades: int | None = DEFAULT_MAX_UPGRADES,
+    basis_total: float = 0.0,
 ) -> tuple[list[dict[str, Any]], float]:
-    """B 在 A 的底座上做逐件升级：
+    """B 在 A 的底座上做「局部升级」：
 
     - 每个 slot 优先保留 A 的原件；
-    - 只有当同品类存在「关键词匹配分更高（或同分但更贵）」的候选，
-      且加进预算仍装得下时，才换成它；
+    - 只有当同品类存在「关键词匹配分**严格更高**」的候选，且加进预算仍装得下时，才换成它；
+      同分不换 —— 同分意味着关键词证据一样多，多花的钱买不到任何额外证据；
+    - 最多替换 max_upgrades 件，其余槽位保留原件（全盘换货不是升级）；
     - 超预算时回退原件（A 本身就是预算内可行解，B 不会比 A 更不可行）。
 
     返回 (selected, spent)。spent 只是预算内可行性的近似，不影响最终 total 计算。
@@ -569,12 +645,13 @@ def _upgrade_basis_items(
     used: set[str] = set()
     selected: list[dict[str, Any]] = []
     spent = 0.0
+    upgrades_done = 0
 
     def _score(item: dict) -> float:
         return float(relevance.get(item.get("id", ""), {}).get("score", 0) or 0)
 
     for base in basis_items:
-        if len(selected) >= max_items:
+        if max_items is not None and len(selected) >= max_items:
             break
         base_cand = cand_by_id.get(base.get("id", ""), base)
         if base_cand.get("id") in used:
@@ -587,20 +664,36 @@ def _upgrade_basis_items(
             c for c in families.get(family, [])
             if c.get("id") != base_cand.get("id") and c.get("id") not in used
         ]
-        alts.sort(key=lambda c: (-_score(c), -float(c.get("price", 0) or 0)))
+        # 同分的候选之间取更便宜的：同分说明证据一样多，没有理由多花钱。
+        alts.sort(key=lambda c: (-_score(c), float(c.get("price", 0) or 0)))
 
         chosen = base_cand
-        for alt in alts:
+        # 已经换够 max_upgrades 件就停止替换，其余槽位保留 A 的原件。
+        can_upgrade = max_upgrades is None or upgrades_done < max_upgrades
+        for alt in (alts if can_upgrade else []):
             alt_score = _score(alt)
+            # 只有「匹配分严格更高」才算升级；同分不换。
+            # 旧实现在同分时优先换更贵的那件，等于用算法保证 B 的价格单调上升 ——
+            # 同分意味着关键词证据一样多，多花的钱什么也没买到（这就是
+            # 「B 换了 8 件、8 件全涨、共有 0 件」的根因）。
+            if alt_score <= base_score + 1e-9:
+                continue
             alt_price = float(alt.get("price", 0) or 0)
-            better = alt_score > base_score + 1e-9 or (
-                abs(alt_score - base_score) < 1e-9 and alt_price > base_price
-            )
-            if not better:
+            # 分级硬门：只有 T0–T3（同一商品 / 同款异规格 / 同品牌）才允许替换。
+            # T4–T5（仅同类型）只配出现在推荐泳道的解释里；T6（仅同大类）永不替换。
+            alt_tier, alt_basis = substitution_tier(alt, base_cand)
+            if alt_tier > MAX_UPGRADE_TIER:
+                continue
+            # 价格硬门：单件涨幅 ≤ 50%（Walmart SNAP 规则），整篮涨幅 ≤ 30%
+            if not price_uplift_ok(alt_price, base_price):
+                continue
+            if basis_total > 0 and spent + alt_price > basis_total * (1.0 + MAX_TOTAL_UPLIFT):
                 continue
             if budget_limit is not None and spent + alt_price > budget_limit:
                 continue
-            chosen = alt
+            chosen = dict(alt)
+            chosen["_substitution_tier"] = alt_tier
+            chosen["_substitution_basis"] = alt_basis
             break
 
         price = float(chosen.get("price", 0) or 0)
@@ -613,6 +706,8 @@ def _upgrade_basis_items(
         selected.append(chosen)
         used.add(chosen.get("id"))
         spent += price
+        if chosen.get("id") != base_cand.get("id"):
+            upgrades_done += 1
 
     # 数量不足时用「匹配优先」补位，保持 B 的推荐性格
     if len(selected) < min_items:
@@ -754,7 +849,10 @@ def _pareto_relation(plan_a: dict, plan_b: dict) -> dict[str, Any]:
     }
 
 
-def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> dict:
+def _compare_plans(
+    plan_a: dict, plan_b: dict, budget_limit: float | None,
+    max_upgrades: int | None = None,
+) -> dict:
     """比较两个方案的差异。
 
     统一思想：两套方案来自同一候选池，因此给出 shared_count / 逐件价差归因，
@@ -765,11 +863,12 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
     ids_b = {it.get("id") for it in items_b}
     shared = [it for it in items_a if it.get("id") in ids_b]
     pareto = _pareto_relation(plan_a, plan_b)
-    # 逐件升级：B 是 A 的「同品类升级」底座（_upgrade_basis_items 保证 slot 一一对应）。
-    # 因此按槽位 zip 归因价差，而不是按 id 配对——同一件商品（同 id）不是升级，
-    # 否则会出现 "一次性塑料袋 1.5→1.5 +0.00" 这种无意义条目。
+    mode_b = plan_b.get("selection_mode")
+    # 逐件升级：B 是 A 的「同款替换」底座（_upgrade_basis_items 保证 slot 一一对应）。
+    # 只有 substitution 模式才存在「替换」这回事；relevance_reselect / independent 下
+    # 按槽位 zip 配对是无意义的（会出现「包装袋 → 桌游」这种假替换）。
     upgrades = []
-    for slot, base in enumerate(items_a):
+    for slot, base in enumerate(items_a if mode_b in (None, "substitution") else []):
         if slot >= len(items_b):
             break
         it = items_b[slot]
@@ -785,15 +884,53 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
                 "from": base.get("price", 0),
                 "to": it.get("price", 0),
                 "delta": round(float(it.get("price", 0)) - float(base.get("price", 0)), 2),
+                # 替换等级：T0 同一商品 / T1 同款异规格 / T2 同品牌同类型 / T3 同品牌
+                "tier": it.get("substitution_tier"),
+                "tier_label": it.get("substitution_tier_label"),
             }
         )
+    only_a_count = len(items_a) - len(shared)
+    only_b_count = len(items_b) - len(shared)
+
+    # 文案必须和 pareto 判定一致：不能一边说「互不占优」，一边在推荐里替用户选 A。
+    if mode_b == "relevance_reselect":
+        recommendation = (
+            "B 没有做替换：本次候选池里没有可辩护的同款/同品牌代换（tier ≤ T3 且涨幅受控），"
+            "于是 B 改为按匹配分独立重排 —— 两方案交集可能为 0，这是数据结论，不是「升级」"
+        )
+    elif not upgrades and not only_a_count and not only_b_count:
+        recommendation = (
+            "两方案件件相同：同品类里没有匹配分更高的候选，B 不会为了「看起来不一样」去换更贵的货"
+        )
+    elif not upgrades:
+        recommendation = (
+            f"两方案件数不同（A {len(items_a)} 件 / B {len(items_b)} 件），"
+            "但同品类里没有匹配分更高的候选可替换 —— 件数差异来自预算与件数上限，不是「升级」"
+        )
+    else:
+        cheaper = sum(1 for u in upgrades if u["delta"] < 0)
+        if cheaper == 0:
+            price_note = (
+                "这几件都更贵 —— 多出来的钱买的是「更贴你的原话」的关键词证据，"
+                "不代表更耐用或更好听"
+            )
+        elif cheaper == len(upgrades):
+            price_note = "这几件都更便宜且匹配分更高 —— 候选池里本来就有更划算的选择"
+        else:
+            price_note = "替换有涨有降，价差逐件可核对"
+        recommendation = (
+            f"两方案互不占优：预算紧选 A（最低总价）；更在意贴合原话选 B"
+            f"（B 只换了 {len(upgrades)} 件同品类、匹配分更高的商品，"
+            f"其余 {len(shared)} 件与 A 相同；{price_note}）"
+        )
+
     return {
         "total_delta": round(plan_b["total"] - plan_a["total"], 2),
         "item_count_a": len(items_a),
         "item_count_b": len(items_b),
         "shared_count": len(shared),
-        "only_a_count": len(items_a) - len(shared),
-        "only_b_count": len(items_b) - len(shared),
+        "only_a_count": only_a_count,
+        "only_b_count": only_b_count,
         "upgrades": upgrades,
         "budget_limit": budget_limit,
         # 对比标准：把「凭什么这样比」写进响应，评委可以逐条核对，而不是相信文案。
@@ -803,6 +940,18 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
             "objective_b": "在预算上限内最大化 Channel3 关键词匹配总分（匹配优先）",
             "same_feasibility": "两方案使用同一 min/max 件数与同一预算上限",
             "evidence": "匹配分 = 标题/标签与检索词的词面重合（match_score / match_tags），不含评分或评论",
+            # 替换范围的自我约束：全盘换货不是升级，B 只在少数槽位上换。
+            "upgrade_scope": (
+                f"B 最多替换 {max_upgrades} 件（同品类 + 匹配分严格更高）；其余槽位保留 A 的原件"
+                if max_upgrades is not None
+                else "B 对每个槽位独立判断（同品类 + 匹配分严格更高才替换）"
+            ),
+            # 替代分级的硬门：这是「凭什么可以换」的可复算依据
+            "substitution_gate": (
+                "只有 tier ≤ T3（同一商品 / 同款异规格 / 同品牌）才允许替换；"
+                "单件涨幅 ≤ 50%、整篮涨幅 ≤ 30%；解析不出品牌或类型时视为 T6，不替换"
+            ),
+            "selection_mode_b": mode_b or "independent",
         },
         "metrics": {
             "total_a": pareto["total_a"],
@@ -814,11 +963,7 @@ def _compare_plans(plan_a: dict, plan_b: dict, budget_limit: float | None) -> di
             "shared_count": len(shared),
         },
         "pareto": pareto,
-        "recommendation": (
-            "建议方案 A（低价优先），适合预算敏感场景"
-            if plan_a["total"] <= (budget_limit or float("inf")) * 0.9
-            else "建议方案 B（同品类关键词匹配优先）；请查看每件商品的匹配证据"
-        ),
+        "recommendation": recommendation,
     }
 
 

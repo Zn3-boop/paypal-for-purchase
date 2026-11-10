@@ -244,7 +244,14 @@ C2_DUAL_PLAN_GENERATION_PROMPT = """你是一个双方案生成器。
 # ============================================================
 # E1: 改单意图解析输出 Schema
 # ============================================================
-ModificationType = Literal["swap_item", "delete_item", "add_item", "adjust_budget", "adjust_constraint"]
+ModificationType = Literal[
+    "swap_item",
+    "delete_item",
+    "add_item",
+    "adjust_budget",
+    "adjust_constraint",
+    "set_quantity",
+]
 
 
 class CartModificationRequest(BaseModel):
@@ -252,7 +259,7 @@ class CartModificationRequest(BaseModel):
     modification_type: ModificationType
     target_item_id: str | None = Field(None, description="目标商品 ID（add 时为 null）")
     replacement_item_id: str | None = Field(None, description="替换商品 ID（swap 时必填）")
-    new_quantity: int | None = Field(None, ge=1, description="新数量（可选）")
+    new_quantity: int | None = Field(None, ge=1, description="新数量（set_quantity 时必填）")
     new_constraint_value: Any | None = Field(None, description="约束调整的新值")
     explanation: str = Field(..., description="修改原因")
 
@@ -275,6 +282,11 @@ E1_CART_MODIFICATION_PROMPT = """你是一个改单意图解析器。
 - add_item: 新增商品（"加一个/再来一瓶/补一个 X"）
 - adjust_budget: 调整预算上限（"预算再加 XX"、"压缩预算到 XX"）
 - adjust_constraint: 调整其他约束（"环保要求放宽"、"颜色改成蓝色"）
+- set_quantity: 改某件的数量（"HD 300 要 2 个"、"把那件改成 3 份"）
+
+"只要 X / 只需要 X 和 Y / 只要 2 个 Z" 这类「只保留点名商品」的指令，
+系统会确定性编译为「对未点名商品逐件 delete_item + 对点名商品 set_quantity」，
+不依赖模型理解；模型只需处理其余的改单说法。
 
 示例：
 输入："把横幅换成环保材质版本，再删掉两瓶矿泉水"

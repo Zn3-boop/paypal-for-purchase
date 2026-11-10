@@ -99,6 +99,8 @@ async def get_order_status(order_id: str, session_id: str = Query(...)):
         "updated_at": order.updated_at,
         "cancelled_reason": order.cancelled_reason,
         "transitions": order.transitions,
+        # 支付窗口截止时间（paying 阶段才有值；过期判定由服务层惰性完成）
+        "expires_at": order.expires_at,
     }
 
 
@@ -117,6 +119,11 @@ async def cancel_existing_order(
 
     if order.status == OrderStatus.PAID:
         raise HTTPException(status_code=409, detail="订单已支付，无法取消")
+    if order.status == OrderStatus.EXPIRED:
+        raise HTTPException(
+            status_code=409,
+            detail="订单已超时过期（expired），不可取消；若随后收到支付成功回跳，将以支付事实为准转为 paid",
+        )
     if order.status == OrderStatus.CANCELLED:
         return {
             "ok": True,

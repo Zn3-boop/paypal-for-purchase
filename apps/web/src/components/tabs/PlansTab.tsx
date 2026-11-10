@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   fetchPlans,
   regeneratePlans,
   type Plan,
   type PlanItem,
-  type PlansComparison,
   type PlansResponse,
+  type Satisfaction,
+  type SatisfactionVerdict,
+  type VerdictStatus,
 } from '../../api'
-import { fetchSplitPreview, type SplitPreviewResponse, createOrder, modifyCart } from '../../api'
-import { RecommendationLane } from '../RecommendationLane'
+import { fetchSplitPreview, fetchCart, type CartResponse, type SplitPreviewResponse, createOrder, modifyCart } from '../../api'
+import { CartPanel } from '../CartPanel'
 
 type Props = {
   sessionId: string
-  onSelectPlan: (planId: 'A' | 'B') => Promise<void>
+  onSelectPlan: (planId: 'A' | 'B', mode?: 'replace' | 'append') => Promise<void>
   selectedPlanId: 'A' | 'B' | null
   /** intent 提交后 ++，触发本 Tab 立即重拉方案（非轮询等待）。 */
   refreshKey?: number
@@ -23,9 +25,6 @@ type Props = {
 const fmtUsd = (n: number | undefined): string => `$${(n ?? 0).toFixed(2)}`
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
-
-/** 商品唯一键：优先 id，缺 id 时退化为 name+price。 */
-const itemKey = (item: PlanItem): string => item.id || `${item.name}:${item.price}`
 
 /** 将后端 PlansResponse 归一化为组件 state。 */
 function plansFrom(res: PlansResponse): { planA: Plan | null; planB: Plan | null } {
@@ -44,18 +43,78 @@ export function PlansTab({
   intentMode,
 }: Props) {
   const [plans, setPlans] = useState<{ planA: Plan | null; planB: Plan | null }>({ planA: null, planB: null })
-  const [comparison, setComparison] = useState<PlansComparison | null>(null)
   const [retrieval, setRetrieval] = useState<PlansResponse['retrieval']>(undefined)
   const [serverIntent, setServerIntent] = useState<{ query: string; mode: 'single' | 'group' } | null>(null)
   const [loading, setLoading] = useState(true)
-  const [showingConfirm, setShowingConfirm] = useState<'A' | 'B' | null>(null)
+  const [showingConfirm, setShowingConfirm] = useState<'A' | 'B' | 'cart' | null>(null)
   const [selecting, setSelecting] = useState<'A' | 'B' | null>(null)
   const [cardError, setCardError] = useState<string | null>(null)
   const [regenerating, setRegenerating] = useState(false)
+  // 购物车中间态：面板可见、可改；选方案/改单后 ++ refreshKey 重拉
+  const [cartSnapshot, setCartSnapshot] = useState<CartResponse | null>(null)
+  const [cartRefreshKey, setCartRefreshKey] = useState(0)
+  // 三个排序 tab 共用同一个推荐盒（不再有 A/B 两张对立卡）
+  const [activeSort, setActiveSort] = useState<'cheap' | 'full' | 'best'>('cheap')
 
   // 检索依据：优先用后端回显（snapshot 重放时也有），不然用刚提交的提问原文
   const effectiveQuery = retrieval?.query || serverIntent?.query || intentQuery || ''
   const effectiveMode = serverIntent?.mode || intentMode || null
+
+  /** CartPanel 回报的购物车快照 —— 结算弹窗里作为「伪 Plan」复用，无需新建弹窗组件。 */
+  const handleCartChange = useCallback((cart: CartResponse | null) => {
+    setCartSnapshot(cart)
+  }, [])
+
+  const cartAsPlan: Plan = useMemo(
+    () => ({
+      plan_id: 'A',
+      strategy: '当前购物车（方案快照 + 你的加购/改单）',
+      items: cartSnapshot?.items ?? [],
+      total: cartSnapshot?.total ?? 0,
+      matched_constraints: [],
+      unmet_constraints: [],
+      trade_offs: [],
+      risks: [],
+      sacrificed_members: [],
+    }),
+    [cartSnapshot],
+  )
+
+  /** 唯一结算入口：有已选方案 → 弹方案确认；否则购物车非空 → 弹购物车确认。 */
+  const openCheckout = () => {
+    if (selectedPlanId) {
+      setShowingConfirm(selectedPlanId)
+      return
+    }
+    if ((cartSnapshot?.items?.length ?? 0) > 0) setShowingConfirm('cart')
+  }
+
+  /**
+   * 三个排序 tab（最省/最全/最贴题）→ 同一个推荐盒：
+   *   最省   = 方案 A（每品类最低价）
+   *   最贴题 = 方案 B（同一候选池最高匹配分）
+   *   最全   = 满足约束条数更多的那一个（A/B 里 satisfaction.passed 高者）
+   * 没有第二个方案时该 tab 不出现 —— 绝不为了凑三个 tab 而编造一个"方案"。
+   */
+  const sortTabs = useMemo(() => {
+    const tabs: { key: 'cheap' | 'full' | 'best'; label: string; plan: Plan }[] = []
+    if (plans.planA) tabs.push({ key: 'cheap', label: '💰 最省', plan: plans.planA })
+    if (plans.planB) tabs.push({ key: 'best', label: '🎯 最贴题', plan: plans.planB })
+    if (plans.planA && plans.planB) {
+      const a = plans.planA.satisfaction?.passed ?? -1
+      const b = plans.planB.satisfaction?.passed ?? -1
+      if (a >= 0 || b >= 0) {
+        const fullest = b > a ? plans.planB : plans.planA
+        // 最全和最省/最贴题是同一份候选集时，不重复出 tab（避免"两个 tab 内容一样"）
+        if (!tabs.some(t => t.plan.plan_id === fullest.plan_id)) {
+          tabs.push({ key: 'full', label: '🏆 最全', plan: fullest })
+        }
+      }
+    }
+    return tabs
+  }, [plans])
+
+  const activePlan = sortTabs.find(t => t.key === activeSort)?.plan ?? sortTabs[0]?.plan ?? null
 
   // 初始加载 + 自适应轮询（等新方案时 1.5s，稳定后 5s）+ intent 提交后立即刷新
   useEffect(() => {
@@ -67,7 +126,6 @@ export function PlansTab({
     // 新检索词 = 新任务：先把上一问的卡片清掉并进入"生成中"。
     // 否则旧方案会一直挂在屏幕上，用户看到的就是"换了问题还是旧推荐"。
     setPlans({ planA: null, planB: null })
-    setComparison(null)
     setRetrieval(undefined)
     setLoading(true)
     tries = 0
@@ -82,7 +140,6 @@ export function PlansTab({
       const respQuery = res.retrieval?.query
       if (intentQuery && respQuery && respQuery !== intentQuery) return false
       setPlans(plansFrom(res))
-      setComparison(res.comparison || null)
       setRetrieval(res.retrieval)
       if (res.intent_query && (res.intent_mode === 'single' || res.intent_mode === 'group')) {
         setServerIntent({ query: res.intent_query, mode: res.intent_mode })
@@ -134,8 +191,7 @@ export function PlansTab({
       .then(() => fetchPlans(sessionId))
       .then(res => {
         setPlans(plansFrom(res))
-        setComparison(res.comparison || null)
-        setRetrieval(res.retrieval)
+          setRetrieval(res.retrieval)
         if (res.intent_query && (res.intent_mode === 'single' || res.intent_mode === 'group')) {
           setServerIntent({ query: res.intent_query, mode: res.intent_mode })
         }
@@ -173,13 +229,20 @@ export function PlansTab({
   return (
     <div style={{ background: '#0f172a', borderRadius: 12, padding: 16, border: '1px solid #374151' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#E5E7EB' }}>🗺️ 双方案对比</h3>
+        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#E5E7EB' }}>🛒 推荐组合</h3>
         {selectedPlanId ? (
           <button
-            onClick={() => setShowingConfirm(selectedPlanId)}
+            onClick={openCheckout}
             style={{ fontSize: 11, padding: '4px 10px', borderRadius: 99, border: '1px solid #10B981', background: 'transparent', color: '#6EE7B7', cursor: 'pointer', fontWeight: 700 }}
           >
             💳 确认并支付方案 {selectedPlanId}
+          </button>
+        ) : (cartSnapshot?.items?.length ?? 0) > 0 ? (
+          <button
+            onClick={openCheckout}
+            style={{ fontSize: 11, padding: '4px 10px', borderRadius: 99, border: '1px solid #10B981', background: 'transparent', color: '#6EE7B7', cursor: 'pointer', fontWeight: 700 }}
+          >
+            💳 结算购物车（{cartSnapshot?.items?.length ?? 0} 件 · {fmtUsd(cartSnapshot?.total)}）
           </button>
         ) : (
           <div style={{ fontSize: 11, color: '#9CA3AF' }}>点「选择此方案」后在这里确认支付</div>
@@ -285,253 +348,92 @@ export function PlansTab({
         </div>
       )}
 
-      {/* Diff 视图：突出两方案差异项 */}
-      {plans.planA && plans.planB && (
-        <DiffView planA={plans.planA} planB={plans.planB} comparison={comparison} />
+      {/* 三个排序 tab 共用**同一个**推荐盒：切换只改排序，不产生"方案 A vs 方案 B"的对立卡。
+          没有第二个方案时只渲染一个 tab —— 不为了凑数编造方案。 */}
+      {sortTabs.length > 1 && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+          {sortTabs.map(tab => {
+            const isActive = (activePlan?.plan_id ?? '') === tab.plan.plan_id
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setActiveSort(tab.key)}
+                style={{
+                  fontSize: 12, padding: '5px 12px', borderRadius: 99, cursor: 'pointer', fontWeight: 600,
+                  background: isActive ? '#1d4ed8' : 'transparent',
+                  border: isActive ? '1px solid #3B82F6' : '1px solid #374151',
+                  color: isActive ? '#DBEAFE' : '#9CA3AF',
+                }}
+                title={
+                  tab.key === 'cheap' ? '每个品类取最低价（总价最小）'
+                    : tab.key === 'best' ? '同一候选池里关键词匹配分最高'
+                      : '满足约束条数最多'
+                }
+              >
+                {tab.label}
+                {tab.key === 'full' && (tab.plan.satisfaction?.total ?? 0) > 0 && (
+                  <span style={{ marginLeft: 4, opacity: 0.8 }}>
+                    {tab.plan.satisfaction?.passed}/{tab.plan.satisfaction?.total}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
       )}
 
-      {/* 第三条泳道：历史信号只在这里出现（A/B 刻意不用，才能被同一句需求复算） */}
-      <RecommendationLane
+      {/* 一个大的推荐盒：组合级「满足 N/M 条」+ 逐条 ✅/❌/❔ + 展开逐件 ✅ */}
+      {activePlan && (
+        <PlanCard
+          plan={activePlan}
+          budgetLimit={getBudgetFromPlan(activePlan)}
+          onSelect={async () => {
+            setSelecting(activePlan.plan_id)
+            setCardError(null)
+            try {
+              // 购物车非空时用 append（合并数量）而不是 replace：不静默清掉用户手加的件
+              await onSelectPlan(activePlan.plan_id, (cartSnapshot?.items?.length ?? 0) > 0 ? 'append' : 'replace')
+              setCartRefreshKey(k => k + 1)
+              setShowingConfirm(activePlan.plan_id)
+            } catch (err) {
+              setCardError(err instanceof Error ? err.message : `选择方案 ${activePlan.plan_id} 失败`)
+            } finally {
+              setSelecting(null)
+            }
+          }}
+          isSelected={selectedPlanId === activePlan.plan_id}
+          busy={selecting !== null}
+          onReopen={() => setShowingConfirm(activePlan.plan_id)}
+        />
+      )}
+
+      {/* 可见可改的购物车中间态：加减数量 / 删除 / 预算事实 / 去结算 */}
+      <CartPanel
         sessionId={sessionId}
-        planA={plans.planA}
-        planB={plans.planB}
-        refreshKey={refreshKey}
+        mode={effectiveMode}
+        refreshKey={cartRefreshKey}
+        onCartChange={handleCartChange}
+        onCheckout={openCheckout}
       />
 
-      {/* 双方案对比卡片（左右布局） */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12, alignItems: 'start' }}>
-        {plans.planA && (
-          <PlanCard
-            plan={plans.planA}
-            budgetLimit={getBudgetFromPlan(plans.planA)}
-            onSelect={async () => {
-              setSelecting('A')
-              setCardError(null)
-              try {
-                await onSelectPlan('A')
-                setShowingConfirm('A')
-              } catch (err) {
-                setCardError(err instanceof Error ? err.message : '选择方案 A 失败')
-              } finally {
-                setSelecting(null)
-              }
-            }}
-            isSelected={selectedPlanId === 'A'}
-            busy={selecting !== null}
-          />
-        )}
-        {plans.planB && (
-          <PlanCard
-            plan={plans.planB}
-            budgetLimit={getBudgetFromPlan(plans.planB)}
-            onSelect={async () => {
-              setSelecting('B')
-              setCardError(null)
-              try {
-                await onSelectPlan('B')
-                setShowingConfirm('B')
-              } catch (err) {
-                setCardError(err instanceof Error ? err.message : '选择方案 B 失败')
-              } finally {
-                setSelecting(null)
-              }
-            }}
-            isSelected={selectedPlanId === 'B'}
-            busy={selecting !== null}
-          />
-        )}
-      </div>
-
-      {/* 二次确认弹窗（带金额的"确认下单"按钮） */}
-      {showingConfirm && (
+      {/* 二次确认弹窗（带金额的"确认下单"按钮）；购物车模式喂「伪 Plan」复用同一弹窗 */}
+      {showingConfirm && (showingConfirm !== 'cart' || (cartSnapshot?.items?.length ?? 0) > 0) && (
         <SplitConfirmationModal
           key={showingConfirm}
           sessionId={sessionId}
           mode={effectiveMode}
-          plan={showingConfirm === 'A' ? plans.planA! : plans.planB!}
+          plan={showingConfirm === 'cart' ? cartAsPlan : showingConfirm === 'A' ? plans.planA! : plans.planB!}
           onClose={() => setShowingConfirm(null)}
         />
       )}
     </div>
   )
 }
-
-/** 按商品 ID 拆分 仅A / 共有 / 仅B，作为 Diff 视图的数据源。 */
-function computeDiff(a: Plan, b: Plan): { onlyA: PlanItem[]; onlyB: PlanItem[]; common: PlanItem[] } {
-  const itemsA = a.items || []
-  const itemsB = b.items || []
-  const keyA = new Set(itemsA.map(itemKey))
-  const keyB = new Set(itemsB.map(itemKey))
-  return {
-    onlyA: itemsA.filter(i => !keyB.has(itemKey(i))),
-    onlyB: itemsB.filter(i => !keyA.has(itemKey(i))),
-    common: itemsA.filter(i => keyB.has(itemKey(i))),
-  }
-}
-
-// Diff 视图：突出差异项（仅A / 共有 / 仅B + 价格差 + 推荐）
-function DiffView({ planA, planB, comparison }: {
-  planA: Plan
-  planB: Plan
-  comparison: PlansComparison | null
-}) {
-  const { onlyA, onlyB, common } = useMemo(() => computeDiff(planA, planB), [planA, planB])
-  const delta = comparison?.total_delta ?? round2((planB.total || 0) - (planA.total || 0))
-  const recommendation = comparison?.recommendation
-  // 共有/专属件数以后端 comparison 为准（B 是 A 的同品类升级，共有商品必然 > 0；
-  // 前端 computeDiff 只作为旧数据兜底，避免显示 "A 8 · 共有 0 · B 8" 这种自相矛盾）
-  const sharedCount = comparison?.shared_count ?? common.length
-  const onlyACount = comparison?.only_a_count ?? onlyA.length
-  const onlyBCount = comparison?.only_b_count ?? onlyB.length
-  const upgrades = comparison?.upgrades || []
-  // 逐件合计 vs 总价差：能对上就明说「可逐条核对」，对不上就老实说差额来自件数不同，
-  // 不让 UI 出现「合计 +$17、总价差 +$12」这种自相矛盾的数字。
-  const upgradeSum = round2(upgrades.reduce((s, u) => s + (u.delta || 0), 0))
-  const reconciled = Math.abs(upgradeSum - delta) < 0.01
-  const [open, setOpen] = useState(true)
-
-  return (
-    <div style={{ border: '1px dashed #60A5FA66', borderRadius: 8, padding: 10, marginBottom: 12, background: '#0d1526' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 12, color: '#93C5FD', fontWeight: 700 }}
-      >
-        ⚖️ 差异对比
-        <span style={{ fontSize: 11, color: '#9CA3AF', fontWeight: 500 }}>
-          A 专属 {onlyACount} · 共有 {sharedCount} · B 专属 {onlyBCount}
-        </span>
-        <span style={{ color: '#6B7280' }}>{open ? '▴' : '▾'}</span>
-      </button>
-
-      {open && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-            <DiffColumn title="仅方案 A" items={onlyA} color="#60A5FA" />
-            <DiffColumn title="共有商品" items={common} color="#34D399" />
-            <DiffColumn title="仅方案 B" items={onlyB} color="#FBBF24" />
-          </div>
-          {/* 叙述层：B 不是一个"更贵的方案"，而是一次具体的替换操作。
-              先看换了哪几件、合计多少；价格差退成第二行做核对 —— 评委看到的是决策，不是差价。 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, color: '#9CA3AF' }}>
-              {upgrades.length > 0 ? (
-                <>
-                  B 换了 <b style={{ color: '#FBBF24' }}>{upgrades.length} 件</b>（合计{' '}
-                  <b style={{ color: '#FBBF24' }}>+{fmtUsd(upgradeSum)}</b>）
-                  <span style={{ color: '#6B7280' }}>
-                    　总价 A {fmtUsd(planA.total || 0)} → B {fmtUsd(planB.total || 0)}（差{' '}
-                    {delta >= 0 ? '+' : ''}{fmtUsd(delta)}
-                    {reconciled ? '，逐件合计 = 总价差，可逐条核对' : '，差额来自件数不同'}）
-                  </span>
-                </>
-              ) : (
-                <>
-                  两方案件件相同（{fmtUsd(planA.total || 0)}）
-                  <span style={{ color: '#6B7280' }}>
-                    　B 的同品类里没有匹配分更高的候选，所以升级为空（不是 B 更差，是本次候选池没有可换的东西）
-                  </span>
-                </>
-              )}
-            </span>
-            {recommendation && (
-              <span style={{ fontSize: 11, color: '#C77DFF', background: '#1e1b4b', padding: '2px 8px', borderRadius: 99 }}>
-                💡 {recommendation}
-              </span>
-            )}
-          </div>
-
-          {/* 逐件 diff 放在三栏之前：B 的每一件都是 A 同品类里更贵/更好的选择，
-              价差可逐件归因、也可以否决（说明 B 只贵在"这几件"上，不是整体乱配） */}
-          {upgrades.length > 0 && (
-            <div style={{ marginTop: 8, background: '#111827', borderRadius: 6, padding: 6 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#FBBF24', marginBottom: 4 }}>
-                ⬆️ 逐件替换（{upgrades.length} 项，合计 {fmtUsd(upgradeSum)}）
-              </div>
-              {upgrades.map((u, idx) => (
-                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: '#D1D5DB', marginBottom: 2 }}>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {u.item ? `${u.item} → ${u.to_item || '同品类升级'}` : '同品类升级'}
-                    {u.category ? `　[${u.category}]` : ''}
-                  </span>
-                  <span style={{ color: '#FBBF24', flexShrink: 0 }}>
-                    {fmtUsd(u.from)} → {fmtUsd(u.to)}（+{fmtUsd(u.delta)}）
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* 对比标准（可复核）：把「凭什么这样比」写进 UI，而不是只给结论。
-              同一候选池 + 两个目标函数（最低总价 / 最高关键词匹配分）+ 帕累托判定。 */}
-          {comparison?.criteria && (
-            <div style={{ marginTop: 8, fontSize: 10, color: '#9CA3AF', background: '#0b1220', borderRadius: 6, padding: 6, lineHeight: 1.55 }}>
-              <div style={{ color: '#93C5FD', fontWeight: 700, marginBottom: 2 }}>📐 对比标准（可复核）</div>
-              <div>{comparison.criteria.domain}</div>
-              <div>A：{comparison.criteria.objective_a}　·　B：{comparison.criteria.objective_b}</div>
-              <div style={{ color: '#6B7280' }}>
-                {comparison.criteria.same_feasibility}　·　{comparison.criteria.evidence}
-              </div>
-              <div style={{ color: '#6B7280' }}>
-                A/B 只用本次需求的两个可复算目标，<b style={{ color: '#A78BFA' }}>不使用检索记忆</b> —— 记忆只在下方「第三条泳道」出现。
-              </div>
-            </div>
-          )}
-          {comparison?.pareto?.note && (
-            <div style={{ marginTop: 6, fontSize: 10, color: comparison.pareto.relation === 'trade_off' ? '#FCD34D' : '#F87171' }}>
-              {comparison.pareto.relation === 'trade_off' ? '⚖️' : '⚠️'} {comparison.pareto.note}
-              {typeof comparison.metrics?.relevance_a === 'number' && (
-                <span style={{ color: '#6B7280' }}>
-                  {' '}（匹配分 A {comparison.metrics.relevance_a} / B {comparison.metrics.relevance_b}）
-                </span>
-              )}
-            </div>
-          )}
-
-
-        </div>
-      )}
-    </div>
-  )
-}
-
-function DiffColumn({ title, items, color }: { title: string; items: PlanItem[]; color: string }) {
-  return (
-    <div style={{ background: '#111827', borderRadius: 6, padding: 6 }}>
-      <div style={{ fontSize: 10, fontWeight: 700, color, marginBottom: 4 }}>
-        {title} ({items.length})
-      </div>
-      {items.length === 0 ? (
-        <div style={{ fontSize: 10, color: '#4B5563', fontStyle: 'italic' }}>—</div>
-      ) : (
-        items.slice(0, 4).map((item, idx) => (
-          <div key={item.id || idx} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#D1D5DB', marginBottom: 2, overflow: 'hidden' }}>
-            {item.image_url ? (
-              <img
-                src={item.image_url}
-                alt={item.name}
-                loading="lazy"
-                style={{ width: 18, height: 18, borderRadius: 3, objectFit: 'cover', flexShrink: 0, background: '#1f2937' }}
-                onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
-              />
-            ) : (
-              <span style={{ width: 18, flexShrink: 0 }} />
-            )}
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {item.name}
-            </span>
-          </div>
-        ))
-      )}
-      {items.length > 4 && <div style={{ fontSize: 9, color: '#6B7280' }}>+{items.length - 4} 更多</div>}
-    </div>
-  )
-}
-
-// 单张方案卡片
-function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
+function PlanCard({ plan, budgetLimit, onSelect, onReopen, isSelected, busy }: {
   plan: Plan
   budgetLimit: number | null
   onSelect: () => void
+  onReopen?: () => void
   isSelected: boolean
   busy: boolean
 }) {
@@ -556,16 +458,26 @@ function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
       border: isSelected ? '2px solid #3B82F6' : isOver ? '1px solid #EF4444' : '1px solid #374151',
       position: 'relative',
     }}>
-      {/* 头部：方案名 + 价格高亮 */}
+      {/* 头部：策略名 + 满足条数 + 价格高亮（不再用「方案 A/B」这种对立命名） */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: '#E5E7EB' }}>方案 {plan.plan_id}</div>
-          <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>{plan.strategy}</div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#E5E7EB', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {plan.strategy || `方案 ${plan.plan_id}`}
+          </div>
+          <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
+            {plan.satisfaction?.judgeable
+              ? `满足约束 ${plan.satisfaction.passed}/${plan.satisfaction.total} 条`
+              : '未声明可判定约束'}
+            {plan.satisfaction?.hidden_failures ? ` · 另有 ${plan.satisfaction.hidden_failures} 条不满足已折叠` : ''}
+          </div>
         </div>
-        <div style={{ fontSize: 20, fontWeight: 700, color: budgetOk ? '#10B981' : isOver ? '#EF4444' : '#F59E0B' }}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: budgetOk ? '#10B981' : isOver ? '#EF4444' : '#F59E0B', flexShrink: 0 }}>
           {fmtUsd(total)}
         </div>
       </div>
+
+      {/* 约束判定（✅/❌/❔ + 可复算证据）：这是「为什么推荐」的正面回答 */}
+      <SatisfactionBlock satisfaction={plan.satisfaction} />
 
       {/* 预算进度条（含超支提示）；未设置预算时只显示总价，不编造预算上限 */}
       {limit == null ? (
@@ -623,38 +535,63 @@ function PlanCard({ plan, budgetLimit, onSelect, isSelected, busy }: {
         </div>
       )}
 
-      {/* 商品清单折叠视图 */}
-      <ItemList items={plan.items || []} />
+      {/* 商品清单折叠视图（逐件 ✅/❌ 徽标） */}
+      <ItemList items={plan.items || []} satisfaction={plan.satisfaction} />
 
-      {/* 操作按钮 */}
+      {/* 操作按钮：未选 → 选方案；已选 → 直接重开结算弹窗（不再变成死按钮） */}
       <button
-        onClick={onSelect}
-        disabled={isSelected || busy}
+        onClick={isSelected ? (onReopen ?? onSelect) : onSelect}
+        disabled={busy}
         style={{
           width: '100%',
           padding: '8px',
           borderRadius: 6,
           border: 'none',
           fontWeight: 600,
-          cursor: (isSelected || busy) ? 'default' : 'pointer',
+          cursor: busy ? 'default' : 'pointer',
           background: isSelected ? '#064e3b' : busy ? '#1e3a5f' : '#3B82F6',
           color: '#fff',
-          opacity: (isSelected || busy) ? 0.7 : 1,
+          opacity: busy ? 0.7 : 1,
           fontSize: 13,
         }}
       >
-        {isSelected ? '已选择' : busy ? '选择中…' : '选择此方案'}
+        {isSelected ? '✓ 已选择 · 点此继续支付' : busy ? '选择中…' : '选择此方案'}
       </button>
     </div>
   )
 }
 
-// 商品清单折叠视图：默认显示前 3 件，可展开全部
-function ItemList({ items }: { items: PlanItem[] }) {
+// 商品清单折叠视图：默认显示前 3 件，可展开全部；带逐件 ✅/❌ 徽标（n/a 不显示徽标）
+function ItemList({ items, satisfaction }: { items: PlanItem[]; satisfaction?: Satisfaction }) {
   const [expanded, setExpanded] = useState(false)
   const list = items && items.length ? items : []
   const visible = expanded ? list : list.slice(0, 3)
   const hasMore = list.length > 3
+  // 用 item_id 索引逐件判定行：有失败件时徽标才亮 ❌，全过亮 ✅，n/a 不显示
+  const rowsById = useMemo(() => {
+    const map = new Map<string, Satisfaction['items'][number]>()
+    ;(satisfaction?.items || []).forEach(r => { if (r.item_id) map.set(r.item_id, r) })
+    return map
+  }, [satisfaction])
+  const badgeFor = (item: PlanItem): { icon: string; color: string; title: string } | null => {
+    const row = item.id ? rowsById.get(item.id) : undefined
+    if (!row) return null
+    const failed = (row.results || []).filter(r => r.status === 'fail')
+    const judged = (row.results || []).filter(r => r.status !== 'n/a')
+    if (failed.length > 0) {
+      return {
+        icon: '❌', color: '#FCA5A5',
+        title: failed.map(f => `${f.label}：${f.evidence}`).join('\n'),
+      }
+    }
+    if (judged.length > 0) {
+      return {
+        icon: '✅', color: '#6EE7B7',
+        title: judged.map(f => `${f.label}：${f.evidence}`).join('\n'),
+      }
+    }
+    return null
+  }
 
   return (
     <div style={{ marginBottom: 12 }}>
@@ -662,11 +599,18 @@ function ItemList({ items }: { items: PlanItem[] }) {
         包含商品 ({list.length})
       </div>
       {list.length === 0 && <div style={{ fontSize: 10, color: '#6B7280', fontStyle: 'italic' }}>暂无商品</div>}
-      {visible.map((item, idx) => (
+      {visible.map((item, idx) => {
+        const badge = badgeFor(item)
+        return (
         <div
           key={item.id || idx}
           style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#D1D5DB', marginBottom: 4, paddingLeft: 8, borderLeft: '2px solid #4B5563' }}
         >
+          {badge && (
+            <span title={badge.title} style={{ color: badge.color, fontSize: 11, flexShrink: 0, cursor: 'help' }}>
+              {badge.icon}
+            </span>
+          )}
           {item.image_url ? (
             <img
               src={item.image_url}
@@ -696,7 +640,8 @@ function ItemList({ items }: { items: PlanItem[] }) {
             {fmtUsd(item.subtotal ?? item.price * (item.quantity || 1))}
           </span>
         </div>
-      ))}
+        )
+      })}
       {hasMore && (
         <button
           onClick={() => setExpanded(e => !e)}
@@ -704,6 +649,59 @@ function ItemList({ items }: { items: PlanItem[] }) {
         >
           {expanded ? '▲ 收起' : `▼ 展开全部 ${list.length} 件`}
         </button>
+      )}
+    </div>
+  )
+}
+
+// 约束判定块：组合级 N/M + 逐条 ✅/❌/❔，每条都带可复算证据串。
+// 红线：unknown 绝不显示成 ✅；❌ 默认最多 2 条（后端已折叠，这里只提示还有几条）。
+function SatisfactionBlock({ satisfaction }: { satisfaction?: Satisfaction }) {
+  if (!satisfaction || !satisfaction.judgeable) {
+    return (
+      <div style={{ marginBottom: 10, fontSize: 10, color: '#6B7280', fontStyle: 'italic' }}>
+        本次需求没有可自动判定的硬约束（预算/环保/品类等），下方商品按检索相关度给出。
+      </div>
+    )
+  }
+  const iconOf = (s: VerdictStatus): { icon: string; color: string } =>
+    s === 'sat' ? { icon: '✅', color: '#6EE7B7' }
+      : s === 'unsat' ? { icon: '❌', color: '#FCA5A5' }
+        : { icon: '❔', color: '#FCD34D' }
+  const shown = (satisfaction.constraints || []).filter(c => c.visible !== false)
+  const hidden = satisfaction.hidden_failures || []
+
+  return (
+    <div style={{ marginBottom: 10, background: '#0b1220', border: '1px solid #374151', borderRadius: 6, padding: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#93C5FD' }}>📋 约束判定</span>
+        <span style={{ fontSize: 10, color: satisfaction.failed > 0 ? '#FCD34D' : '#6EE7B7', fontWeight: 600 }}>
+          {satisfaction.headline}
+        </span>
+      </div>
+      {shown.map(c => {
+        const { icon, color } = iconOf(c.status)
+        return (
+          <div key={c.constraint_id} style={{ display: 'flex', gap: 6, fontSize: 10, lineHeight: 1.5, marginBottom: 2 }}>
+            <span style={{ color, flexShrink: 0 }}>{icon}</span>
+            <span style={{ minWidth: 0 }}>
+              <span style={{ color: '#D1D5DB' }}>{c.content || c.constraint_id}</span>
+              {(c.evidence || c.reason) && (
+                <span style={{ color: '#6B7280' }}>　{c.evidence || c.reason}</span>
+              )}
+            </span>
+          </div>
+        )
+      })}
+      {hidden.length > 0 && (
+        <div style={{ fontSize: 10, color: '#6B7280', marginTop: 3 }}>
+          另有 {hidden.length} 条不满足已折叠（数据完整保留，未隐藏计算）
+        </div>
+      )}
+      {satisfaction.unknown > 0 && (
+        <div style={{ fontSize: 10, color: '#6B7280', marginTop: 3 }}>
+          ❔ {satisfaction.unknown} 条无法从商品数据判定（不当作满足）
+        </div>
       )}
     </div>
   )
@@ -720,6 +718,9 @@ function SplitConfirmationModal({ sessionId, plan, mode, onClose }: {
   const total = plan.total ?? 0
   const itemCount = plan.items?.length || 0
   const isGroup = mode === 'group'
+  // 购物车模式：plan 是「伪 Plan」，标题/订单名都用购物车语义，不冒充"方案 A"
+  const isCartMode = /当前购物车/.test(plan.strategy || '')
+  const planLabel = isCartMode ? '当前购物车' : `方案 ${plan.plan_id}: ${plan.strategy || ''}`
   const [preview, setPreview] = useState<SplitPreviewResponse | null>(null)
   const [previewLoading, setPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
@@ -755,6 +756,20 @@ function SplitConfirmationModal({ sessionId, plan, mode, onClose }: {
     return () => { alive = false }
   }, [sessionId, isGroup])
 
+  // 金额以**真实购物车**为准：打开弹窗先同步一次 /cart，避免弹窗金额和购物车面板对不上。
+  // 失败不阻塞下单（服务端仍会按购物车校验），只是沿用方案快照金额。
+  useEffect(() => {
+    let alive = true
+    fetchCart(sessionId)
+      .then(res => {
+        if (!alive) return
+        if (typeof res.total === 'number') setCartTotal(res.total)
+        if (typeof res.items?.length === 'number') setCartCount(res.items.length)
+      })
+      .catch(() => { /* 忽略：沿用快照金额 */ })
+    return () => { alive = false }
+  }, [sessionId])
+
   const handleConfirm = async () => {
     if (confirmDisabled || previewLoading) return
     setConfirmDisabled(true)
@@ -764,7 +779,7 @@ function SplitConfirmationModal({ sessionId, plan, mode, onClose }: {
         amount: cartTotal,
         session_id: sessionId,
         user_email: 'user@example.com',
-        item_name: `Group Purchase Plan ${plan.plan_id}`,
+        item_name: isCartMode ? 'Cart Checkout' : `Group Purchase Plan ${plan.plan_id}`,
       })
       window.location.href = res.approval_url
     } catch (err) {
@@ -822,7 +837,7 @@ function SplitConfirmationModal({ sessionId, plan, mode, onClose }: {
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 4 }}>
-            方案 {plan.plan_id}: {plan.strategy} · {cartCount} 件商品
+            {planLabel} · {cartCount} 件商品
           </div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#10B981' }}>总计 {fmtUsd(cartTotal)}</div>
           {Math.abs(cartTotal - total) > 0.005 && (

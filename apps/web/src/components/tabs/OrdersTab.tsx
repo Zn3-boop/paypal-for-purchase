@@ -18,10 +18,10 @@ type Props = {
 }
 
 const STATUS_LABEL: Record<OrderStatus, string> = {
-  draft: '待复核', confirmed: '已确认', paying: '支付中', paid: '已支付', cancelled: '已取消',
+  draft: '待复核', confirmed: '已确认', paying: '支付中', paid: '已支付', cancelled: '已取消', expired: '已超时',
 }
 const STATUS_COLOR: Record<OrderStatus, string> = {
-  draft: '#FBBF24', confirmed: '#60A5FA', paying: '#C084FC', paid: '#34D399', cancelled: '#F87171',
+  draft: '#FBBF24', confirmed: '#60A5FA', paying: '#C084FC', paid: '#34D399', cancelled: '#F87171', expired: '#94A3B8',
 }
 const fmtUsd = (amount: number, currency: string) => `${currency === 'USD' ? '$' : ''}${amount.toFixed(2)}${currency === 'USD' ? '' : ` ${currency}`}`
 

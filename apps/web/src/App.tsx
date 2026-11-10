@@ -102,8 +102,8 @@ function AppShell() {
     return () => { alive = false }
   }, [sessionId])
 
-  const handleSelectPlan = useCallback(async (planId: 'A' | 'B') => {
-    await selectPlan(sessionId, planId)
+  const handleSelectPlan = useCallback(async (planId: 'A' | 'B', mode: 'replace' | 'append' = 'replace') => {
+    await selectPlan(sessionId, planId, mode)
     setSelectedPlanId(planId)
     // 不切面板：选方案后紧接着在 PlansTab 内打开二次确认弹窗
   }, [sessionId])

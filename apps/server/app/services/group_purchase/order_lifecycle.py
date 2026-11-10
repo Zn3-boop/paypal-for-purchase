@@ -1,7 +1,8 @@
 """订单生命周期状态机（H1 模块）+ 订单档案库（H2/H3 数据底座）。
 
     draft ──▶ confirmed ──▶ paying ──▶ paid
-                  │            │
+                  │            │           ▲
+                  │            ├──▶ expired ┘   (读路径惰性判定；支付事实可推翻)
                   └──▶ cancelled ◀──┘
 
 转移守卫（Guard，违反则结构上无法转移）：
@@ -13,6 +14,8 @@
   - paying → paid      ：capture 成功 且 captured_amount == 订单金额
                          （D2 副门：金额一致性纵深防御）
   - paying → cancelled ：用户取消 / PayPal 回调 cancelled / 金额不符告警
+  - paying → expired   ：读路径发现已过 expires_at（本地推断，见 expire_if_stale）
+  - expired → paid     ：外部事实优先 —— PayPal capture 已 COMPLETED 时推翻本地过期判定
 
 关键设计：
   - 幂等：目标状态 == 当前状态时返回成功但不重复记审计，PayPal 回调重试安全。
@@ -28,7 +31,7 @@ import threading
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -50,13 +53,16 @@ class OrderStatus(str, Enum):
     PAYING = "paying"          # 已向 PayPal 发起支付，等待回跳
     PAID = "paid"              # 支付完成（终态）
     CANCELLED = "cancelled"    # 已取消 / 金额不符告警（终态）
+    EXPIRED = "expired"        # 支付窗口已过（本地推断；可被支付事实推翻）
 
 
 # 合法转移表：key = 当前状态，value = 允许到达的状态集合
 _ALLOWED_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.DRAFT: {OrderStatus.CONFIRMED, OrderStatus.CANCELLED},
     OrderStatus.CONFIRMED: {OrderStatus.PAYING, OrderStatus.CANCELLED},
-    OrderStatus.PAYING: {OrderStatus.PAID, OrderStatus.CANCELLED},
+    OrderStatus.PAYING: {OrderStatus.PAID, OrderStatus.CANCELLED, OrderStatus.EXPIRED},
+    # 外部事实优先：迟到的成功回跳可以推翻本地「过期」推断（金额守卫仍然生效）
+    OrderStatus.EXPIRED: {OrderStatus.PAID},
     OrderStatus.PAID: set(),
     OrderStatus.CANCELLED: set(),
 }
@@ -82,6 +88,8 @@ class OrderRecord:
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     cancelled_reason: str | None = None
     transitions: list[dict[str, Any]] = field(default_factory=list)
+    # paying 的支付窗口截止时间（ISO8601）。None = 未进入 paying / 老数据（不判超时）。
+    expires_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -99,6 +107,7 @@ class OrderRecord:
             "updated_at": self.updated_at,
             "cancelled_reason": self.cancelled_reason,
             "transitions": self.transitions,
+            "expires_at": self.expires_at,
         }
 
     def brief(self) -> dict[str, Any]:
@@ -113,6 +122,7 @@ class OrderRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "cancelled_reason": self.cancelled_reason,
+            "expires_at": self.expires_at,
         }
 
 
@@ -179,6 +189,7 @@ def order_from_dict(data: dict[str, Any]) -> OrderRecord:
         updated_at=str(data.get("updated_at") or now),
         cancelled_reason=data.get("cancelled_reason"),
         transitions=list(data.get("transitions") or []),
+        expires_at=data.get("expires_at"),
     )
 
 
@@ -221,7 +232,11 @@ def load_orders_from_disk() -> int:
 
 def get_order_record(order_id: str) -> OrderRecord | None:
     with _orders_lock:
-        return _orders.get(order_id)
+        order = _orders.get(order_id)
+    # 读路径惰性判定：必须在释放 _orders_lock 之后（转移内部会再次加锁写盘）
+    if order is not None:
+        expire_if_stale(order)
+    return order
 
 
 def list_order_records(session_id: str | None = None) -> list[OrderRecord]:
@@ -229,6 +244,9 @@ def list_order_records(session_id: str | None = None) -> list[OrderRecord]:
         records = list(_orders.values())
     if session_id:
         records = [r for r in records if r.session_id == session_id]
+    # 读路径惰性判定（锁已释放）：超时的 paying 在列表里直接呈现为 expired
+    for record in records:
+        expire_if_stale(record)
     records.sort(key=lambda r: r.created_at, reverse=True)
     return records
 
@@ -239,6 +257,69 @@ def _save(order: OrderRecord) -> None:
     with _orders_lock:
         _orders[order.order_id] = order
     _append_to_disk(order)
+
+
+# ============================================================
+# 支付窗口（惰性过期）
+#   进入 paying 写 expires_at；读路径发现超时 → expired（本地推断）
+#   不引入定时器：没有常驻循环，也就没有新的故障点
+# ============================================================
+
+ORDER_PAYING_TTL_SECONDS = 1800  # 30 分钟；录制 3 分钟不会自然过期
+
+
+def get_paying_ttl_seconds() -> int:
+    """支付窗口时长（秒）。
+
+    环境变量 ORDER_PAYING_TTL_SECONDS 可覆盖（测试用短 TTL，演示/生产用 30 分钟）。
+    """
+    raw = os.getenv("ORDER_PAYING_TTL_SECONDS", str(ORDER_PAYING_TTL_SECONDS))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return ORDER_PAYING_TTL_SECONDS
+
+
+def payment_window_closed(order: OrderRecord, now: datetime | None = None) -> bool:
+    """paying 且已越过 expires_at → True。
+
+    expires_at 缺失（老数据 / 尚未进入 paying）一律视为「没有窗口」，不误杀。
+    """
+    if order.status != OrderStatus.PAYING or not order.expires_at:
+        return False
+    try:
+        deadline = datetime.fromisoformat(order.expires_at)
+    except ValueError:
+        return False
+    if deadline.tzinfo is None:  # 兼容历史上可能写入的 naive 时间
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) > deadline
+
+
+def expire_if_stale(
+    order: OrderRecord,
+    *,
+    actor: str = "lazy_expiry",
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """读路径惰性过期：paying + 超时 → expired，并写 order_status_changed。
+
+    返回 (是否发生转移, 描述)。幂等：非 paying / 未超时 / 已过期都返回 false。
+    「过期」只是本地推断，PayPal 回跳 COMPLETED 时可以 expired → paid 推翻。
+    """
+    if not payment_window_closed(order, now):
+        return False, ""
+    return transition_order(
+        order,
+        OrderStatus.EXPIRED,
+        actor=actor,
+        reason=(
+            f"支付窗口已过（expires_at={order.expires_at}"
+            f"，TTL={get_paying_ttl_seconds()}s）：本地推断，支付事实可推翻"
+        ),
+    )
+
+
 # ============================================================
 # 转移守卫（Guard）
 # ============================================================
@@ -301,7 +382,11 @@ def reconcile_sessions_on_startup() -> int:
         logger.info("startup: restored %d order records from disk", restored)
 
     comp_count = 0
-    pending = [o for o in list_order_records()]  # 无 session_id 过滤，遍历全库
+    # 注意：这里必须读「原始」注册表，不能走 list_order_records()——
+    # 后者带惰性过期判定，会把「审计已有 payment_completed」的订单先标成 expired。
+    # 对账优先级：外部/审计事实 > 本地时间推断。
+    with _orders_lock:
+        pending = list(_orders.values())  # 无 session_id 过滤，遍历全库
     for order in pending:
         if order.status != OrderStatus.PAYING:
             continue
@@ -376,6 +461,7 @@ def transition_order(
     *,
     actor: str,
     reason: str | None = None,
+    reason_code: str | None = None,
     guard: Callable[[], tuple[bool, str]] | None = None,
 ) -> tuple[bool, str]:
     """执行一次状态转移。
@@ -385,6 +471,9 @@ def transition_order(
       - 非法：不在迁移表     → (False, 错误信息)，状态不变
       - 守卫失败             → (False, 错误信息)，状态不变
       - 成功               → (True, 转移描述)，记 order_status_changed 审计
+
+    reason_code：机器可读的原因码（如 expired→paid 的
+    ``remote_completed_after_local_expiry``），随审计事件落盘，Q&A 可 grep 复算。
     """
     if order.status == target:
         return True, f"订单已是 {target.value}，幂等跳过（不重复记账）"
@@ -407,6 +496,7 @@ def transition_order(
             "at": datetime.now(timezone.utc).isoformat(),
             "actor": actor,
             "reason": reason,
+            "reason_code": reason_code,
         }
     )
     _save(order)
@@ -431,6 +521,7 @@ def transition_order(
             from_status=prev.value,
             to_status=target.value,
             reason=reason,
+            reason_code=reason_code,
         )
     except Exception as exc:  # pragma: no cover - 审计失败不阻断主链路
         logger.warning("audit order_status_changed failed: %s", exc)
@@ -484,14 +575,24 @@ def begin_payment(
     *,
     budget_check: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """confirmed → paying。守卫：check_budget PASS（D2 主门）。"""
-    return transition_order(
+    """confirmed → paying。守卫：check_budget PASS（D2 主门）。
+
+    进入 paying 的同时开支付窗口（expires_at）。幂等：已在 paying 且已开窗时不延长，
+    避免「反复点支付 / 回调重试」把过期时间无限续下去。
+    """
+    ok, msg = transition_order(
         order,
         OrderStatus.PAYING,
         actor=actor,
         reason="发起 PayPal 支付",
         guard=lambda: guard_budget_passed(budget_check),
     )
+    if ok and order.status == OrderStatus.PAYING and not order.expires_at:
+        order.expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=get_paying_ttl_seconds())
+        ).isoformat()
+        _save(order)
+    return ok, msg
 
 
 def complete_payment(
@@ -500,14 +601,31 @@ def complete_payment(
     actor: str = "paypal_callback",
     *,
     expected_total: float | None = None,
+    reason: str | None = None,
 ) -> tuple[bool, str]:
-    """paying → paid。守卫：captured_amount == 订单金额（D2 副门）。"""
+    """paying / expired → paid。守卫：captured_amount == 订单金额（D2 副门）。
+
+    expired → paid 是「外部事实优先」的唯一入口：本地时间推断被 PayPal 的
+    capture COMPLETED 推翻时，审计 reason 必须写明原因，便于回放复核。
+    """
     expected = expected_total if expected_total is not None else order.total
+    default_reason = f"PayPal capture 成功，金额 {float(captured_amount):.2f}"
+    if reason is None and order.status == OrderStatus.EXPIRED:
+        default_reason = (
+            f"本地判定已过期，但 PayPal capture 已完成（金额 {float(captured_amount):.2f}），"
+            "以支付事实为准"
+        )
+    reason_code = (
+        "remote_completed_after_local_expiry"
+        if order.status == OrderStatus.EXPIRED
+        else None
+    )
     return transition_order(
         order,
         OrderStatus.PAID,
         actor=actor,
-        reason=f"PayPal capture 成功，金额 {float(captured_amount):.2f}",
+        reason=reason or default_reason,
+        reason_code=reason_code,
         guard=lambda: guard_amount_matched(captured_amount, expected),
     )
 
@@ -518,7 +636,9 @@ def cancel_order(
     *,
     reason: str = "用户取消",
 ) -> tuple[bool, str]:
-    """draft / confirmed / paying → cancelled（paid 之后不可取消）。"""
+    """draft / confirmed / paying → cancelled（paid 之后不可取消；expired 也不可取消）。"""
+    if order.status == OrderStatus.EXPIRED:
+        return False, "订单已超时过期（expired），不可取消；若收到支付成功回跳将以支付事实为准"
     return transition_order(
         order,
         OrderStatus.CANCELLED,

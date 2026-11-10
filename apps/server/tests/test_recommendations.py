@@ -286,3 +286,32 @@ def test_placement_outside_both_plans_states_the_rule_that_excluded_it(tmp_path,
     assert "超预算" in card["placement_reason"]
     assert "39.90" in card["placement_reason"]
 
+def test_other_sessions_do_not_poison_my_recommendation_query(tmp_path, monkeypatch):
+    """跨会话记忆只配当展示：谁的推荐都不该混进别人的「买水壶」。
+
+    回归背景：collect_signals 曾把团队级 recent_searches 的前 2 条 + 最近一次选择 +
+    已选商品名全部擀进 query_used，于是「买一张 rnb 唱片」会搜出
+    "board game ... water bottle ... stainless steel"，推荐泳道返回 3 个水瓶。
+    """
+    monkeypatch.setenv("SEARCH_MEMORY_DIR", str(tmp_path / "mem"))
+    # 别的会话先搜过/选过水瓶
+    sm.record_search("sess-other", "user-other", "water bottle insulated 500ml")
+    sm.record_selection(
+        "sess-other", "user-other", "B", 120.0,
+        ["Insulated Travel Water Bottle"], query="water bottle insulated 500ml",
+    )
+    # 本会话只搜过黑胶
+    sm.record_search("sess-rec", "user-rec", QUERY)
+    session = _session()
+    monkeypatch.setattr("app.services.channel3.search_products_with_status", _fake_search())
+
+    out = asyncio.run(rec.build_recommendations(session, limit=3))
+
+    used = str(out["query_used"] or "").lower()
+    assert "water" not in used and "bottle" not in used and "500ml" not in used, used
+    assert "jazz" in used or "vinyl" in used, used
+
+    # 展示信号也必须是本会话自己的，否则「你搜过 X」会冒充别的会话
+    rows = out["signals"]["recent_searches"]
+    assert rows and all(r["session_id"] == "sess-rec" for r in rows)
+    assert out["signals"]["selected_items"] == []

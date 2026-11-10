@@ -49,9 +49,29 @@ async def parse_modification_intent(
     catalog: list[dict[str, Any]] | None = None,
 ) -> CartModificationOutput:
     """E1：解析用户的改单指令。
-    
-    使用 LLM 进行结构化提取，自动重试/修复 JSON。
+
+    「只要 X / 只要 A 和 B / 只要 2 个 C」这类「只保留点名商品」的句式走**确定性**
+    编译（不进模型）：既省一次往返，也避免模型把它降级成空操作。
+    其余指令才交给 LLM 结构化提取，失败时降级规则解析。
     """
+    keep_only = _keep_only_plan(user_instruction, current_cart)
+    if keep_only is not None:
+        keep_mods, keep_items = keep_only
+        keep_ids = {it.id for it in keep_items}
+        keep_label = "、".join(it.name for it in keep_items)
+        dropped = [it for it in current_cart if it.id not in keep_ids]
+        return CartModificationOutput(
+            modifications=keep_mods,
+            intent_summary=(
+                f"只要「{keep_label}」：保留 {len(keep_items)} 件，删除其余 {len(dropped)} 件"
+                if dropped
+                else f"购物车已经只有「{keep_label}」，数量按指令对齐"
+            ),
+            expected_total_delta=round(
+                -sum(it.price * it.quantity for it in dropped), 2
+            ),
+        )
+
     from app.services.llm.client import llm_parse_with_retry
     from app.services.group_purchase.prompts import E1_CART_MODIFICATION_PROMPT
     
@@ -171,6 +191,189 @@ def _match_item_in_text(instruction: str, cart: list[PlanItem]) -> PlanItem | No
     return best if best_score >= 0.6 else None
 
 
+# 「只要 X / 只需要 X 和 Y / 只要 2 个 Z」= **只保留点名的那些商品**（可多件、可带数量），
+# 其余全部删除。
+#
+# 为什么必须确定性处理：这句话既不是 delete（没说要删哪件），也不是 swap/add，
+# LLM/规则解析都容易只回一个 adjust_constraint → 执行 0 个改动 → 前端报
+# 「没识别到可执行的改动」。但用户意图（"我只要这几件/这两件各两个"）其实非常明确。
+# 电商里这是最高频的下单说法，不能靠模型随手发挥。
+_KEEP_TRIGGER = re.compile(
+    r"(?:只需要?|只要|只买|只想买|仅要|仅买|只留|留下|保留|就要|只想保留|"
+    r"only\s+(?:want|need|keep)|keep\s+only)",
+    re.IGNORECASE,
+)
+
+# 数量单位：中文量词 + 英文 pcs/pieces/units
+_QTY_UNIT = r"(?:个|件|副|只|套|台|部|条|盒|瓶|支|对|双|张|包|pcs|pieces|piece|units|unit)"
+_CN_NUM = {
+    "一": 1, "二": 2, "两": 2, "俩": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+_NUM_TOKEN = r"(?:\d+|[一二两俩三四五六七八九十])"
+
+
+def _is_keep_only(instruction: str) -> bool:
+    return bool(_KEEP_TRIGGER.search(instruction or ""))
+
+
+def _keep_clause(instruction: str) -> str:
+    """取**最后一个**「只要」之后的那段话 —— 保留清单只在这段里找。
+
+    「不要 AVENTHO 300，只要 DJ 300」必须只保留 DJ 300：若拿整句去匹配，
+    AVENTHO 也会被当成"要保留"，等于把用户明确否掉的东西留下。
+    """
+    instruction = instruction or ""
+    triggles = list(_KEEP_TRIGGER.finditer(instruction))
+    if not triggles:
+        return instruction
+    return instruction[triggles[-1].end():]
+
+
+def _to_quantity(token: str) -> int | None:
+    token = (token or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    return _CN_NUM.get(token)
+
+
+def _match_items_in_text(
+    text: str,
+    cart: list[PlanItem],
+) -> list[tuple[PlanItem, int, int]]:
+    """在文本里确定性地找出**所有**被点名的购物车商品 → [(商品, 起, 止)]。
+
+    与 `_match_item_in_text`（只取最优一件）的区别：这里要的是集合 ——
+    「只要 A 和 B」「只要 A、B、C」必须一次保留多件。
+    两级匹配与单件版一致：整名/ID 逐字包含（名字长的先占位，避免 "HD 300"
+    抢掉 "HD 300 PROtect"）→ token 覆盖率 ≥0.6 兜底缩写说法。
+    """
+    lower = (text or "").lower()
+    if not lower or not cart:
+        return []
+
+    spans: list[tuple[int, int]] = []
+    hits: list[tuple[PlanItem, int, int]] = []
+    seen: set[str] = set()
+
+    # ① 整名 / ID：长的先占位，避免子串误命中
+    cands: list[tuple[int, PlanItem, str]] = []
+    for it in cart:
+        for key in (it.id, it.name):
+            k = (key or "").strip().lower()
+            if len(k) >= 3:
+                cands.append((len(k), it, k))
+    for _, it, key in sorted(cands, key=lambda c: -c[0]):
+        start = lower.find(key)
+        if start < 0:
+            continue
+        end = start + len(key)
+        if any(not (end <= s or start >= e) for s, e in spans):
+            continue  # 已被更长的商品名占位
+        spans.append((start, end))
+        if it.id not in seen:
+            seen.add(it.id)
+            hits.append((it, start, end))
+
+    # ② token 覆盖兜底：只补没命中过的件，避免同一件被算两次
+    hit_names = [h[0].name.strip().lower() for h in hits if h[0].name]
+    for it in cart:
+        if it.id in seen:
+            continue
+        lname = (it.name or "").strip().lower()
+        # 已被更精确的点名覆盖：说「AVENTHO 300」不该把
+        # 「AVENTHO 300 Wireless Bluetooth Headphones」也一起留下
+        if lname and any(h and (h in lname or lname in h) for h in hit_names):
+            continue
+        tokens = _name_tokens(it.name)
+        if not tokens:
+            continue
+        matched = [t for t in tokens if t in lower]
+        if len(matched) / len(tokens) < 0.6:
+            continue
+        pos = min(lower.find(t) for t in matched)
+        seen.add(it.id)
+        hits.append((it, pos, pos + 1))
+
+    hits.sort(key=lambda h: h[1])
+    return hits
+
+
+def _nearby_quantity(text: str, start: int, end: int) -> int | None:
+    """读商品名紧邻的数量（"2 个 X" / "X 两件" / "X x2" / "X 要 3 个"），读不到返回 None。"""
+    before = text[max(0, start - 16):start]
+    after = text[end:end + 16]
+
+    m = re.search(
+        rf"(?:数量|个数|要|需要)?\s*({_NUM_TOKEN})\s*{_QTY_UNIT}\s*$",
+        before,
+        re.IGNORECASE,
+    )
+    if m:
+        return _to_quantity(m.group(1))
+    m = re.match(rf"\s*[×xX]\s*({_NUM_TOKEN})(?![0-9a-zA-Z])", after)
+    if m:
+        return _to_quantity(m.group(1))
+    m = re.match(rf"\s*(?:要|需要|来|买|改成|换成)?\s*({_NUM_TOKEN})\s*{_QTY_UNIT}", after, re.IGNORECASE)
+    if m:
+        return _to_quantity(m.group(1))
+    return None
+
+
+def _keep_only_plan(
+    instruction: str,
+    cart: list[PlanItem],
+) -> tuple[list[CartModificationRequest], list[PlanItem]] | None:
+    """把「只要 X（可多件 / 可带数量）」编译成一组确定性的购物车指令。
+
+    返回 (指令列表, 要保留的商品)。以下情况返回 None（宁可让用户改口，也不猜）：
+      - 不是「只要 …」句式；
+      - 购物车为空；
+      - 保留清单里一件都认不出来（否则可能把车删空）。
+    指令命中、且购物车已经正好只剩这些件时，指令列表为空 —— 由调用方明说「已满足」。
+    """
+    if not cart or not _is_keep_only(instruction):
+        return None
+
+    clause = _keep_clause(instruction)
+    matched = _match_items_in_text(clause, cart)
+    if not matched:
+        return None
+
+    keep_items = [it for it, _, _ in matched]
+    keep_ids = {it.id for it in keep_items}
+    keep_label = "、".join(it.name for it in keep_items)
+
+    mods: list[CartModificationRequest] = []
+    # 「一种多个」：点名商品的期望数量与原数量不一致 → set_quantity（同 id 多行会被合并）
+    for it, start, end in matched:
+        want = _nearby_quantity(clause, start, end)
+        if want is not None and want != it.quantity:
+            mods.append(
+                CartModificationRequest(
+                    modification_type="set_quantity",
+                    target_item_id=it.id,
+                    new_quantity=want,
+                    explanation=f"「只要 {it.name}」→ 数量设为 {want}",
+                )
+            )
+    # 「多个不同种类」：未点名的每一件都删（按 id 删，覆盖同款重复行）
+    for it in cart:
+        if it.id in keep_ids:
+            continue
+        mods.append(
+            CartModificationRequest(
+                modification_type="delete_item",
+                target_item_id=it.id,
+                explanation=f"「只要 {keep_label}」→ 删除其余商品：{it.name}",
+            )
+        )
+
+    return mods, keep_items
+
+
 def _repair_targets(
     parsed: CartModificationOutput,
     instruction: str,
@@ -233,6 +436,30 @@ async def execute_modifications(
                     unmet_targets.append(mod.target_item_id)
             else:
                 unmet_targets.append("（没指明要删哪件）")
+        elif mod.modification_type == "set_quantity":
+            if mod.target_item_id and mod.new_quantity:
+                new_cart: list[PlanItem] = []
+                hit_index: int | None = None
+                merged = 0
+                for it in current_cart:
+                    if it.id == mod.target_item_id:
+                        if hit_index is None:
+                            # 同一商品可能因重复加购出现多行：只留一行，数量按指令设
+                            it.quantity = int(mod.new_quantity)
+                            it.subtotal = round(it.price * it.quantity, 2)
+                            hit_index = len(new_cart)
+                            new_cart.append(it)
+                        else:
+                            merged += 1
+                    else:
+                        new_cart.append(it)
+                if hit_index is not None:
+                    current_cart = new_cart
+                    applied += 1 + merged
+                else:
+                    unmet_targets.append(mod.target_item_id)
+            else:
+                unmet_targets.append("（没指明要改哪件/改成几个）")
         elif mod.modification_type == "swap_item":
             if mod.target_item_id and mod.replacement_item_id:
                 # 在 catalog 中找到替换商品
@@ -396,11 +623,47 @@ async def modify_cart_and_replan(
             "budget_ok": False,
             "warnings": ["请先选择方案并添加到购物车"],
         }
-    
+
+    # 「只要 X」但一件都认不出来：明确告诉用户可以点什么，而不是"没识别到改动"
+    keep_only = _keep_only_plan(user_instruction, current_cart)
+    if _is_keep_only(user_instruction) and keep_only is None:
+        names = "、".join(it.name for it in current_cart[:4])
+        return {
+            "success": False,
+            "message": f"没能从这句话里认出购物车里的商品。请带上完整商品名；购物车现有：{names}",
+            "updated_cart": [it.to_dict() for it in current_cart],
+            "new_total": round(
+                calc_total([{"price": it.price, "quantity": it.quantity} for it in current_cart]), 2
+            ),
+            "budget_ok": True,
+            "warnings": [],
+            "fallback": None,
+            "intent_summary": "「只要 X」未匹配到购物车商品",
+        }
+
     parsed = await parse_modification_intent(user_instruction, current_cart, catalog)
     # 确定性补目标：LLM 只回类型不回 id 时，按商品名/ID 在指令里把 target 找回来，
     # 否则 delete_item 会变成空操作（总价不变却报"已改单"）。
     parsed = _repair_targets(parsed, user_instruction, current_cart)
+
+    # 「只要 X」且购物车已经正好只剩这些件（数量也对得上）：本来就满足，
+    # 不能再报"没有识别到可执行的改动"，否则用户会以为自己说错了。
+    if keep_only is not None and not parsed.modifications:
+        total = round(
+            calc_total([{"price": it.price, "quantity": it.quantity} for it in current_cart]), 2
+        )
+        kept_label = "、".join(it.name for it in keep_only[1])
+        return {
+            "success": True,
+            "message": f"购物车已经是「{kept_label}」（{len(current_cart)} 件，${total:.2f}），可直接确认下单",
+            "updated_cart": [it.to_dict() for it in current_cart],
+            "new_total": total,
+            "budget_ok": True,
+            "warnings": [],
+            "fallback": None,
+            "intent_summary": f"购物车已满足「只要 {kept_label}」",
+            "expected_delta": 0.0,
+        }
     
     # 2. 执行修改
     result = await execute_modifications(

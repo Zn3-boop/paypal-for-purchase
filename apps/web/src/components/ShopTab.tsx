@@ -10,7 +10,7 @@ import { PlansTab } from './tabs/PlansTab'
  */
 type Props = {
   sessionId: string
-  onSelectPlan: (planId: 'A' | 'B') => Promise<void>
+  onSelectPlan: (planId: 'A' | 'B', mode?: 'replace' | 'append') => Promise<void>
   selectedPlanId: 'A' | 'B' | null
   refreshKey?: number
   intentQuery?: string | null

@@ -110,6 +110,37 @@ async def test_ok_result_cached_and_key_normalized():
     channel3_module._CACHE.clear()
 
 
+def test_dns_pin_pins_api_host_and_ignores_non_pin_hosts():
+    """CHANNEL3_DNS_PIN 生效：api.trychannel3.com 解析被固定到真实 IP，非 pin 域名不受影响。
+
+    2026-11-10 实测：本机网关把 api.trychannel3.com 的 CNAME 目标
+    （d-aklj24vug8.execute-api.us-east-1.amazonaws.com）解析成 127.0.0.1 且时好时坏，
+    而 8.8.8.8 / --resolve 均能拿真实 AWS IP。应用层 pin 只固定 connect 阶段的目标 IP，
+    TLS 的 SNI/Host/证书校验仍基于域名本身 —— 不关校验、不改 hosts、无需管理员权限。
+    """
+    import socket as socket_module
+
+    with patch.dict(os.environ, {"CHANNEL3_DNS_PIN": "3.212.207.12,3.230.231.112"}):
+        config = Channel3Config.from_env()
+        assert config.dns_pin == ("3.212.207.12", "3.230.231.112")
+        Channel3SearchClient(config)  # __init__ 会安装全局 pin
+        try:
+            api_addrinfo = socket_module.getaddrinfo("api.trychannel3.com", 443)
+            cname_addrinfo = socket_module.getaddrinfo(
+                "d-aklj24vug8.execute-api.us-east-1.amazonaws.com", 443
+            )
+        finally:
+            channel3_module._install_dns_pin([])  # 恢复系统解析，避免污染其他测试
+
+    resolved = {info[4][0] for info in api_addrinfo}
+    assert "3.212.207.12" in resolved, resolved
+    assert "127.0.0.1" not in resolved, "pin 生效后不应再出现被污染的 127.0.0.1"
+    cname_resolved = {info[4][0] for info in cname_addrinfo}
+    assert cname_resolved == {"3.212.207.12"}, cname_resolved
+    # 非 pin 域名必须走原 getaddrinfo（localhost 在 hosts 里，不依赖外网，稳定可断网）
+    passthrough = socket_module.getaddrinfo("localhost", 80)
+    assert passthrough, "非 pin 域名必须走原 getaddrinfo"
+
 @pytest.mark.asyncio
 async def test_planner_surfaces_channel3_error_status():
     """planner 降级时把 channel3_status 进字段，note 说清"暂时不可用"。"""

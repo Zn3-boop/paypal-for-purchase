@@ -156,6 +156,8 @@ def _get_or_create_order(session, user_id: str, total: float, items: list[dict])
     复用范围只覆盖未终结状态（draft / confirmed / paying）：
       - 已取消（cancelled）的订单允许重新建单，否则用户取消后永远无法再次支付
         （session.order_id 会一直指向那条终态订单，后续 create_order 直接被 409 拒绝）。
+      - 已过期（expired）的订单同样允许重新建单：支付窗口已过，需要新的订单号；
+        旧单保留在订单档案里，作为「这一单确实过期了」的证据。
       - 已支付（paid）的订单仍复用，由调用方返回 409 阻止重复支付（防重复扣款）。
     """
     from app.services.group_purchase.order_lifecycle import (
@@ -166,7 +168,10 @@ def _get_or_create_order(session, user_id: str, total: float, items: list[dict])
 
     if session.order_id:
         existing = get_order_record(session.order_id)
-        if existing is not None and existing.status != OrderStatus.CANCELLED:
+        if existing is not None and existing.status not in (
+            OrderStatus.CANCELLED,
+            OrderStatus.EXPIRED,
+        ):
             return existing
 
     plan_id = None
@@ -519,6 +524,16 @@ async def paypal_callback(
                     status_code=302,
                 )
             return {"success": False, "order_id": order.order_id, "status": "CANCELLED", "message": "订单已取消"}
+
+        # 本地已判 expired：仍继续 capture —— 外部事实优先。
+        # 若 PayPal 侧 COMPLETED，complete_payment 会走 expired → paid，并在审计 reason 写明原因；
+        # 若未完成，保持 expired（比「假装还在支付中」更接近事实）。
+        if order.status == OrderStatus.EXPIRED:
+            logger.info(
+                "order %s locally expired (expires_at=%s), callback proceeds: external fact decides",
+                order.order_id,
+                order.expires_at,
+            )
 
         # 细节 1：幂等判断必须保持在 callback 入口最前（在任何 capture / 审计写入之前）。
         # 若放在中间，重复回调会走到 payment_completed 已写入之后才被拦截，

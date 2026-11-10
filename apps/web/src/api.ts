@@ -343,6 +343,54 @@ export interface Plan {
   budget_ok?: boolean
   budget_check?: BudgetCheck
   sacrificed_members?: string[]
+  /** 约束满足度总账：组合级 N/M 条 + 逐条 ✅/❌/❔ + 证据串（satisfaction.py 纯计算）。 */
+  satisfaction?: Satisfaction
+}
+
+/** 逐条约束的判定：sat=满足 / unsat=不满足 / unknown=数据判不了（绝不假装 ✅）。 */
+export type VerdictStatus = 'sat' | 'unsat' | 'unknown'
+export type ItemVerdictStatus = 'pass' | 'fail' | 'n/a'
+
+export interface SatisfactionVerdict {
+  constraint_id: string
+  type: string
+  content: string
+  source?: string
+  hard?: boolean
+  status: VerdictStatus
+  /** 可复算的证据串，如 "$285.00 ≤ $350.00" / "标签命中环保（recycled）"。 */
+  evidence?: string | null
+  reason?: string | null
+  /** false = 超过 ❌ 显示上限被折叠（数据仍在，只是不展示）。 */
+  visible?: boolean
+}
+
+export interface SatisfactionItemRow {
+  item_id: string
+  name: string
+  price: number
+  passed: number
+  failed: number
+  results: {
+    constraint_id: string
+    label: string
+    type: string
+    status: ItemVerdictStatus
+    evidence: string
+  }[]
+}
+
+export interface Satisfaction {
+  judgeable: boolean
+  total: number
+  passed: number
+  failed: number
+  unknown: number
+  headline: string
+  max_failures_shown: number
+  hidden_failures: string[]
+  constraints: SatisfactionVerdict[]
+  items: SatisfactionItemRow[]
 }
 
 /** 后端 planner._compare_plans() 返回的双方案对比摘要。 */
@@ -363,6 +411,9 @@ export interface PlansComparison {
     from?: number
     to?: number
     delta?: number
+    /** 替代分级：T0 同一商品 / T1 同款异规格 / T2 同品牌同类型 / T3 同品牌 */
+    tier?: number | null
+    tier_label?: string | null
   }[]
   /** 「凭什么这样比」：同一候选池 + 双目标（最低总价 / 最高关键词匹配分）。 */
   criteria?: ComparisonCriteria
@@ -376,6 +427,12 @@ export interface ComparisonCriteria {
   objective_b?: string
   same_feasibility?: string
   evidence?: string
+  /** B 的替换上限（最多几件、什么条件）。 */
+  upgrade_scope?: string
+  /** 替代分级硬门（tier ≤ T3 / 单件 ≤ 50% / 整篮 ≤ 30%）：可复算的「凭什么能换」。 */
+  substitution_gate?: string
+  /** B 的选品方式：substitution（A 的同款替换）/ relevance_reselect（无可辩护替换 → 同池重排）。 */
+  selection_mode_b?: 'independent' | 'substitution' | 'relevance_reselect' | string
 }
 
 export interface ComparisonMetrics {
@@ -479,6 +536,14 @@ export interface RecommendationCard {
   reason: string
   basis?: 'search' | 'selection' | 'anchor' | 'none'
   basis_value?: string
+  /** 主原因码（一卡一主码）：FILLS_CATEGORY_GAP / CHEAPER_ALTERNATIVE / SAME_RELEASE_OTHER_EDITION / SAME_ARTIST / SAME_GENRE / HISTORY_DIRECTION */
+  reason_code?: string
+  /** 至多一个辅码（只做补充，不改主叙事）。 */
+  reason_code_secondary?: string | null
+  /** 主码对应的可复核人话（纯函数产出，不依赖模型随机性）。 */
+  reason_code_text?: string
+  /** 与本次检索的归一化相关度 [0,1]（rel = min(1, 命中锚点/4)）。 */
+  relevance?: number
   /** 与上方 A/B 的关系：in_a / in_b / in_both / neither（neither 必带 placement_reason）。 */
   placement?: 'in_a' | 'in_b' | 'in_both' | 'neither'
   placement_reason?: string
@@ -486,7 +551,7 @@ export interface RecommendationCard {
 }
 
 export interface RecommendationSignals {
-  recent_searches?: { query: string; count?: number; ts?: string }[]
+  recent_searches?: { query: string; count?: number; ts?: string; session_id?: string }[]
   last_selection?: {
     plan_id?: string
     total?: number
@@ -594,9 +659,13 @@ export async function fetchPlans(sessionId: string): Promise<PlansResponse> {
   return await resp.json()
 }
 
-export async function selectPlan(sessionId: string, planId: 'A' | 'B'): Promise<Record<string, unknown>> {
+export async function selectPlan(
+  sessionId: string,
+  planId: 'A' | 'B',
+  mode: 'replace' | 'append' = 'replace',
+): Promise<Record<string, unknown>> {
   const resp = await fetch(
-    `${API_BASE}/cart/select_plan?session_id=${encodeURIComponent(sessionId)}&plan_id=${planId}`,
+    `${API_BASE}/cart/select_plan?session_id=${encodeURIComponent(sessionId)}&plan_id=${planId}&mode=${mode}`,
     { method: 'POST' },
   )
   if (!resp.ok) {
@@ -622,6 +691,34 @@ export interface SplitPreviewResponse {
   adjustment_member: string | null
 }
 
+// ===== Group purchase: cart =====
+
+/**
+ * 当前购物车（服务端唯一真相）。
+ *
+ * 下单金额由 `POST /paypal/create_order` 按购物车重算，前端传的 amount 只作日志对照；
+ * 所以弹窗打开时必须以这里为准 —— 选方案会把购物车重置成方案快照，推荐泳道的
+ * 「加入购物车」是在此基础上追加，两者叠加后的真实金额只有 /cart 知道。
+ */
+export interface CartResponse {
+  items: PlanItem[]
+  total: number
+  /** 预算合规事实（只报告不拦截）；服务端 GET /cart 与 PATCH/DELETE 都会带上。 */
+  guardrail?: CartGuardrail
+}
+
+export async function fetchCart(sessionId: string): Promise<CartResponse> {
+  const resp = await withSessionRetry(
+    sessionId,
+    `${API_BASE}/cart?session_id=${encodeURIComponent(sessionId)}`,
+  )
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(body?.detail || `Fetch cart failed: ${resp.status}`)
+  }
+  return await resp.json()
+}
+
 export async function fetchSplitPreview(sessionId: string): Promise<SplitPreviewResponse> {
   const resp = await fetch(
     `${API_BASE}/cart/split_preview?session_id=${encodeURIComponent(sessionId)}`,
@@ -634,8 +731,63 @@ export async function fetchSplitPreview(sessionId: string): Promise<SplitPreview
   return await resp.json()
 }
 
+// ===== Group purchase: cart 可编辑闭环（PATCH 改数量 / DELETE 删行） =====
+
+/** 购物车合规事实：**只报告不拦截** —— 用户要能「改到预算内再付」，把关点在 create_order。 */
+export interface CartGuardrail {
+  status: 'ok' | 'fail' | 'no_budget'
+  ok: boolean
+  budget: number | null
+  total: number
+  overage: number | null
+  message?: string
+}
+
+export interface CartMutationResponse {
+  success: boolean
+  message?: string
+  item_id?: string
+  quantity?: number
+  old_total?: number
+  new_total?: number
+  cart: CartResponse
+  guardrail?: CartGuardrail
+}
+
+export async function updateCartItemQuantity(
+  sessionId: string,
+  itemId: string,
+  quantity: number,
+): Promise<CartMutationResponse> {
+  const resp = await fetch(
+    `${API_BASE}/cart/items/${encodeURIComponent(itemId)}?session_id=${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quantity }),
+    },
+  )
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(detailMessage(body?.detail, `Update quantity failed: ${resp.status}`))
+  }
+  return await resp.json()
+}
+
+export async function removeCartItem(sessionId: string, itemId: string): Promise<CartMutationResponse> {
+  const resp = await fetch(
+    `${API_BASE}/cart/items/${encodeURIComponent(itemId)}?session_id=${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE' },
+  )
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(detailMessage(body?.detail, `Remove item failed: ${resp.status}`))
+  }
+  return await resp.json()
+}
+
 // ===== Group purchase: order archive (H3) =====
-export type OrderStatus = 'draft' | 'confirmed' | 'paying' | 'paid' | 'cancelled'
+export type OrderStatus = 'draft' | 'confirmed' | 'paying' | 'paid' | 'cancelled' | 'expired'
 
 export interface OrderSummary {
   order_id: string
@@ -647,6 +799,8 @@ export interface OrderSummary {
   created_at: string
   updated_at: string
   cancelled_reason?: string | null
+  /** paying 的支付窗口截止时间（ISO8601）；超时后读接口会惰性迁移到 expired。 */
+  expires_at?: string | null
 }
 
 export interface OrdersResponse {

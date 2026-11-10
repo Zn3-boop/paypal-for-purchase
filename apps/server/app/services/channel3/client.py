@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import socket
 import ssl
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from time import time
-from typing import Any
+from typing import Any, Sequence
 
 from app.services.channel3.config import Channel3Config
 
@@ -96,9 +97,60 @@ def ssl_context_chain() -> list[ssl.SSLContext]:
     return chain
 
 
+# ---------------------------------------------------------------------------
+# 应用层 DNS pin（2026-11-10 加入）
+#   演示机网关/ISP DNS 把 api.trychannel3.com 的 CNAME 目标
+#   （d-aklj24vug8.execute-api.us-east-1.amazonaws.com）解析成 127.0.0.1，
+#   且时好时坏（8.8.8.8 与 --resolve 均拿到真实 AWS IP）。不开管理员权限、
+#   不改 hosts、不关 TLS 校验的解法：只在 connect 阶段把目标 IP 固定下来，
+#   URL 仍是 api.trychannel3.com → SNI / Host / 证书校验全部照旧。
+#   仅当 CHANNEL3_DNS_PIN 非空时生效；空列表即恢复系统解析。
+# ---------------------------------------------------------------------------
+_DNS_PIN_HOSTS = frozenset(
+    {
+        "api.trychannel3.com",
+        "d-aklj24vug8.execute-api.us-east-1.amazonaws.com",
+    }
+)
+_DNS_PIN_IPS: tuple[str, ...] = ()
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _pinned_getaddrinfo(*args, **kwargs):  # noqa: ANN002,ANN003
+    """socket.getaddrinfo 的 pin 版：命中 _DNS_PIN_HOSTS 且配了 pin → 用固定 IP 解析。"""
+    host = kwargs["host"] if "host" in kwargs else (args[0] if args else None)
+    if isinstance(host, str) and host in _DNS_PIN_HOSTS and _DNS_PIN_IPS:
+        last_exc: OSError | None = None
+        for ip in _DNS_PIN_IPS:
+            try:
+                if "host" in kwargs:
+                    return _original_getaddrinfo(ip, *args, **{**kwargs, "host": ip})
+                return _original_getaddrinfo(ip, *args[1:], **kwargs)
+            except OSError as exc:  # 某个 pin IP 不可达就试下一个
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+    return _original_getaddrinfo(*args, **kwargs)
+
+
+def _install_dns_pin(ips: Sequence[str]) -> None:
+    """设置/清空 DNS pin；幂等，传空序列即恢复系统解析。"""
+    global _DNS_PIN_IPS
+    _DNS_PIN_IPS = tuple(dict.fromkeys(ips))
+    socket.getaddrinfo = _pinned_getaddrinfo if _DNS_PIN_IPS else _original_getaddrinfo
+    if _DNS_PIN_IPS:
+        logger.info(
+            "Channel3 DNS pin 生效：%s → %s",
+            sorted(_DNS_PIN_HOSTS),
+            list(_DNS_PIN_IPS),
+        )
+
+
 class Channel3SearchClient:
     def __init__(self, config: Channel3Config | None = None) -> None:
         self._config = config or Channel3Config.from_env()
+        # 应用层 DNS pin：系统解析被污染时固定真实 IP（仅 pin 域名生效，TLS 校验不放松）
+        _install_dns_pin(self._config.dns_pin)
         self._contexts: list[ssl.SSLContext] = ssl_context_chain()
         # 每个信任来源一个 SDK 实例（SDK 内部持有自己的 httpx.Client）
         self._sdks: list[Any | None] = [None] * len(self._contexts)

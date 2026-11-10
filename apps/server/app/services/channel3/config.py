@@ -16,6 +16,9 @@ class Channel3Config:
     language: str = ""
     country: str = ""
     currency: str = ""
+    # 应用层 DNS pin：系统解析被污染时固定连到真实 IP（TLS 校验不放松）。
+    # 空元组 = 不启用，走系统解析。
+    dns_pin: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> Channel3Config:
@@ -30,6 +33,11 @@ class Channel3Config:
             language=settings.channel3_language,
             country=settings.channel3_country,
             currency=settings.channel3_currency,
+            dns_pin=tuple(
+                ip.strip()
+                for ip in (settings.channel3_dns_pin or "").split(",")
+                if ip.strip()
+            ),
         )
 
     @property
