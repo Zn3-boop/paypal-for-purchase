@@ -480,7 +480,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 396 tests
+python -m pytest -q        # 397 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /

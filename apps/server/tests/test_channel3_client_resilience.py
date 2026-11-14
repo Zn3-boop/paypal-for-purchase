@@ -221,3 +221,37 @@ async def test_planner_surfaces_channel3_error_status():
     assert "error" in retrieval["note"]
     assert "本地" in retrieval["note"], "降级必须说清用了什么后备"
     assert retrieval["sponsor_related"] == []
+@pytest.mark.asyncio
+async def test_cached_query_bypasses_open_circuit_but_fresh_query_short_circuits():
+    """时序根因回归（2026-11-14 排查）：缓存命中优先级高于熔断，
+    熔断期内已缓存 query 秒回 ok、未缓存新 query 被短路 error。
+
+    这正是「团购 Channel3 error、单人可用」现象的机制差 —— 团购与单人走同一条
+    _retrieve_catalog 路径（无路径差异），差异来自：
+      - 单人演示词（台灯/伞/包）在 30min 缓存里 → 命中缓存绕过熔断；
+      - 团购新词（马克杯/充电宝）不在缓存 → 撞上 60s 熔断窗口 → 短路 error。
+    真正的触发源是「某次真实请求瞬时失败」→ 熔断打开；与团购/单人语义无关。
+    """
+    channel3_module._CACHE.clear()
+    # 预置一条「已成功的历史词」（30min TTL，ok 才入缓存）
+    channel3_module._CACHE[channel3_module._cache_key("desk lamp", 20)] = {
+        "items": [{"id": "ch3_l1", "name": "LED Desk Lamp"}],
+        "status": CHANNEL3_OK,
+        "message": "",
+        "timestamp": time.time(),
+    }
+    # 模拟熔断打开：60s 内刚失败过一次（模块级全局，测试后必须复位）
+    channel3_module._last_failure_at = time.monotonic()
+    try:
+        cached = await channel3_module.search_products_with_status("desk lamp", 20)
+        fresh = await channel3_module.search_products_with_status("power bank", 20)
+    finally:
+        channel3_module._last_failure_at = None
+        channel3_module._CACHE.clear()
+
+    assert cached.status == CHANNEL3_OK and cached.items, (
+        "已缓存历史词应绕过熔断秒回（缓存是之前真取到的事实，不需要新网络请求）"
+    )
+    assert fresh.status == CHANNEL3_ERROR and "熔断" in fresh.message, (
+        "未缓存新词应被熔断短路 → 这正是团购新词 error、单人演示词 ok 的根因"
+    )
