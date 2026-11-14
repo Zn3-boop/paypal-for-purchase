@@ -4,12 +4,13 @@ import {
   regeneratePlans,
   type Plan,
   type PlanItem,
+  type PlansFallbackInfo,
   type PlansResponse,
   type Satisfaction,
   type SatisfactionVerdict,
   type VerdictStatus,
 } from '../../api'
-import { fetchSplitPreview, fetchCart, type CartResponse, type SplitPreviewResponse, createOrder, modifyCart } from '../../api'
+import { fetchSplitPreview, fetchCart, type CartResponse, type SplitPreviewResponse, createOrder, modifyCart, addCartItem } from '../../api'
 import { CartPanel } from '../CartPanel'
 
 type Props = {
@@ -25,6 +26,17 @@ type Props = {
 const fmtUsd = (n: number | undefined): string => `$${(n ?? 0).toFixed(2)}`
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/**
+ * 数据源人话化。后端字段保持 `channel3` / `k1_catalog` 原值（审计可复算），
+ * 界面只负责翻译：直接把 `channel3` 甩给用户，等于让用户猜这是什么。
+ */
+const dataSourceLabel = (source?: string | null): string => {
+  if (!source) return ''
+  if (source === 'channel3') return '赞助商 Channel3'
+  if (source === 'k1_catalog') return '本地示例目录'
+  return source
+}
 
 /** 将后端 PlansResponse 归一化为组件 state。 */
 function plansFrom(res: PlansResponse): { planA: Plan | null; planB: Plan | null } {
@@ -43,6 +55,13 @@ export function PlansTab({
   intentMode,
 }: Props) {
   const [plans, setPlans] = useState<{ planA: Plan | null; planB: Plan | null }>({ planA: null, planB: null })
+  // 无解状态：feasible=false 时后端会带 fallback 说明 + 约束诊断，
+  // 之前这里被丢掉了，用户只看到"⏳ 等待生成方案"——明明已经算完、结论是无解。
+  const [infeasible, setInfeasible] = useState<{
+    fallback?: PlansFallbackInfo
+    satisfaction?: Satisfaction
+    scope?: string
+  } | null>(null)
   const [retrieval, setRetrieval] = useState<PlansResponse['retrieval']>(undefined)
   const [serverIntent, setServerIntent] = useState<{ query: string; mode: 'single' | 'group' } | null>(null)
   const [loading, setLoading] = useState(true)
@@ -64,6 +83,23 @@ export function PlansTab({
   const handleCartChange = useCallback((cart: CartResponse | null) => {
     setCartSnapshot(cart)
   }, [])
+
+  /**
+   * 单品加购：只把「这一件」放进车里。
+   *
+   * 为什么需要：`select_plan` 是整份方案入车，对「我只想买一件」的用户意味着
+   * 装进 8~16 件再逐个删。这里让方案卡里的每一行都能单独 ➕。
+   * 后端只认方案快照内的商品（价格/来源以快照为准，购物车不藏假货）。
+   */
+  const handleAddItem = useCallback(async (item: PlanItem) => {
+    try {
+      await addCartItem(sessionId, item.id)
+      setCartRefreshKey(k => k + 1)
+      setCardError(null)
+    } catch (err) {
+      setCardError(err instanceof Error ? err.message : `加入「${item.name}」失败`)
+    }
+  }, [sessionId])
 
   const cartAsPlan: Plan = useMemo(
     () => ({
@@ -127,6 +163,7 @@ export function PlansTab({
     // 否则旧方案会一直挂在屏幕上，用户看到的就是"换了问题还是旧推荐"。
     setPlans({ planA: null, planB: null })
     setRetrieval(undefined)
+    setInfeasible(null)
     setLoading(true)
     tries = 0
 
@@ -135,12 +172,26 @@ export function PlansTab({
      * 提交新需求时，上一轮（带 Channel3 检索，可能几秒到几十秒）仍可能在快照失效后落盘，
      * GET 就会把上一问的方案回放出来——表现就是"换了问题却还是旧方案，要手动刷新"。
      * 所以查询词对不上就不落地，按 1.5s 快跑重试，新快照一到立刻替换。
+     *
+     * 注意比较必须 trim 后再比：后端 `submit_intent` 会把 message `.strip()` 后存成
+     * intent_query，而这里接到的 intentQuery 是用户在输入框里打的**原文**。只要首尾
+     * 有空格（中文输入法的全角空格、复制粘贴带换行），两边就永远不相等，表现是
+     * 审计里方案早生成了，页面却一直停在「⏳ 等待生成方案」。
      */
     const apply = (res: PlansResponse): boolean => {
-      const respQuery = res.retrieval?.query
-      if (intentQuery && respQuery && respQuery !== intentQuery) return false
-      setPlans(plansFrom(res))
+      const norm = (s?: string | null) => (s ?? '').trim()
+      const respQuery = norm(res.retrieval?.query)
+      if (norm(intentQuery) && respQuery && respQuery !== norm(intentQuery)) return false
+      const normalized = plansFrom(res)
+      setPlans(normalized)
       setRetrieval(res.retrieval)
+      // 「算完了但没有可行组合」是一个结论，不是一个中间态：必须落地成可展示的卡片，
+      // 否则前端会一直停在"等待生成方案"，用户永远等不到东西。
+      setInfeasible(
+        res.feasible === false && !normalized.planA && !normalized.planB
+          ? { fallback: res.fallback, satisfaction: res.satisfaction, scope: res.satisfaction_scope }
+          : null,
+      )
       if (res.intent_query && (res.intent_mode === 'single' || res.intent_mode === 'group')) {
         setServerIntent({ query: res.intent_query, mode: res.intent_mode })
       }
@@ -190,8 +241,14 @@ export function PlansTab({
     regeneratePlans(sessionId)
       .then(() => fetchPlans(sessionId))
       .then(res => {
-        setPlans(plansFrom(res))
-          setRetrieval(res.retrieval)
+        const normalized = plansFrom(res)
+        setPlans(normalized)
+        setRetrieval(res.retrieval)
+        setInfeasible(
+          res.feasible === false && !normalized.planA && !normalized.planB
+            ? { fallback: res.fallback, satisfaction: res.satisfaction, scope: res.satisfaction_scope }
+            : null,
+        )
         if (res.intent_query && (res.intent_mode === 'single' || res.intent_mode === 'group')) {
           setServerIntent({ query: res.intent_query, mode: res.intent_mode })
         }
@@ -218,6 +275,20 @@ export function PlansTab({
   }
 
   if (!plans.planA && !plans.planB) {
+    // 无解是有结论的失败：讲清楚"卡在哪条约束、候选池里有什么、能怎么改"，
+    // 而不是永远显示"等待生成方案"（那会让用户以为还在算，实际早就返回了）。
+    if (infeasible) {
+      return (
+        <InfeasibleCard
+          fallback={infeasible.fallback}
+          satisfaction={infeasible.satisfaction}
+          scope={infeasible.scope}
+          retrieval={retrieval}
+          onRegenerate={onRegenerate}
+          regenerating={regenerating}
+        />
+      )
+    }
     return (
       <div style={{ background: '#0f172a', borderRadius: 12, padding: 20, border: '1px solid #374151', textAlign: 'center' }}>
         <div style={{ fontSize: 16, fontWeight: 600, color: '#FCD34D', marginBottom: 8 }}>⏳ 等待生成方案</div>
@@ -269,7 +340,7 @@ export function PlansTab({
               {effectiveMode === 'group' ? '👥 团购模式' : '🧍 单人模式'}
             </span>
           )}
-          {retrieval?.source && <span style={{ color: '#9CA3AF' }}>数据源 {retrieval.source}</span>}
+          {retrieval?.source && <span style={{ color: '#9CA3AF' }}>数据源 {dataSourceLabel(retrieval.source)}</span>}
           {/* 三态徽标：error 是"暂时不可用"（可重试），empty 是"商品库真没匹配"，
               两者文案与颜色都不同，避免把可恢复故障说成产品缺陷。 */}
           {retrieval?.channel3_status === 'error' && (
@@ -285,7 +356,10 @@ export function PlansTab({
           )}
           {typeof retrieval?.candidate_count === 'number' && (
             <span style={{ color: '#9CA3AF' }}>
-              候选 {retrieval.candidate_count} 件 · 命中 {retrieval.matched_count ?? 0} 件
+              召回 {retrieval.candidate_count} 件 · 命中 {retrieval.matched_count ?? 0} 件
+              {typeof retrieval?.filtered_count === 'number' && retrieval.filtered_count > 0 && (
+                <> · 过滤 {retrieval.filtered_count} 件</>
+              )}
             </span>
           )}
           {retrieval?.note && (
@@ -404,6 +478,7 @@ export function PlansTab({
           isSelected={selectedPlanId === activePlan.plan_id}
           busy={selecting !== null}
           onReopen={() => setShowingConfirm(activePlan.plan_id)}
+          onAddItem={handleAddItem}
         />
       )}
 
@@ -429,11 +504,12 @@ export function PlansTab({
     </div>
   )
 }
-function PlanCard({ plan, budgetLimit, onSelect, onReopen, isSelected, busy }: {
+function PlanCard({ plan, budgetLimit, onSelect, onReopen, onAddItem, isSelected, busy }: {
   plan: Plan
   budgetLimit: number | null
   onSelect: () => void
   onReopen?: () => void
+  onAddItem?: (item: PlanItem) => Promise<void>
   isSelected: boolean
   busy: boolean
 }) {
@@ -468,13 +544,29 @@ function PlanCard({ plan, budgetLimit, onSelect, onReopen, isSelected, busy }: {
             {plan.satisfaction?.judgeable
               ? `满足约束 ${plan.satisfaction.passed}/${plan.satisfaction.total} 条`
               : '未声明可判定约束'}
-            {plan.satisfaction?.hidden_failures ? ` · 另有 ${plan.satisfaction.hidden_failures} 条不满足已折叠` : ''}
+            {(plan.satisfaction?.hidden_failures?.length ?? 0) > 0
+              ? ` · 另有 ${plan.satisfaction!.hidden_failures.length} 条不满足已折叠`
+              : ''}
           </div>
         </div>
         <div style={{ fontSize: 20, fontWeight: 700, color: budgetOk ? '#10B981' : isOver ? '#EF4444' : '#F59E0B', flexShrink: 0 }}>
           {fmtUsd(total)}
         </div>
       </div>
+
+      {/* P0-3 软预算上限：无明确预算时「最贴题」超最省方案 3 倍 → 折叠提示，不冒充推荐 */}
+      {plan.soft_cap_exceeded && (
+        <div style={{ marginBottom: 8, fontSize: 10, color: '#FCA5A5', background: '#2a0d0d', padding: 6, borderRadius: 4, border: '1px dashed #EF444466' }}>
+          ⚠️ {plan.soft_cap_note || '「最贴题」总价超出软预算上限，已折叠'}
+        </div>
+      )}
+
+      {/* 数量诚实（评审盯点②）：需求 N 件只找到 M 件时列明，方案不冒充「需求已满足」 */}
+      {plan.quantity_shortfall && (
+        <div style={{ marginBottom: 8, fontSize: 10, color: '#FCD34D', background: '#1f1a08', padding: 6, borderRadius: 4, border: '1px dashed #F59E0B66' }}>
+          {plan.quantity_note || '数量未满足：候选不足，未静默凑数'}
+        </div>
+      )}
 
       {/* 约束判定（✅/❌/❔ + 可复算证据）：这是「为什么推荐」的正面回答 */}
       <SatisfactionBlock satisfaction={plan.satisfaction} />
@@ -536,7 +628,7 @@ function PlanCard({ plan, budgetLimit, onSelect, onReopen, isSelected, busy }: {
       )}
 
       {/* 商品清单折叠视图（逐件 ✅/❌ 徽标） */}
-      <ItemList items={plan.items || []} satisfaction={plan.satisfaction} />
+      <ItemList items={plan.items || []} satisfaction={plan.satisfaction} onAddItem={onAddItem} />
 
       {/* 操作按钮：未选 → 选方案；已选 → 直接重开结算弹窗（不再变成死按钮） */}
       <button
@@ -561,36 +653,46 @@ function PlanCard({ plan, budgetLimit, onSelect, onReopen, isSelected, busy }: {
   )
 }
 
-// 商品清单折叠视图：默认显示前 3 件，可展开全部；带逐件 ✅/❌ 徽标（n/a 不显示徽标）
-function ItemList({ items, satisfaction }: { items: PlanItem[]; satisfaction?: Satisfaction }) {
+// 商品清单折叠视图：默认显示前 3 件，可展开全部。
+// **单品层不做「总判定」** —— 行首红叉曾被误读成「这件不行」，实际只是「这条判不了」。
+// 现在改成逐条标签（✅ 命中 / ❔ 不可判），全组共性在顶部写一次（8/8 都是呢绒 → 只写一行）。
+function ItemList({ items, satisfaction, onAddItem }: { items: PlanItem[]; satisfaction?: Satisfaction; onAddItem?: (item: PlanItem) => Promise<void> }) {
   const [expanded, setExpanded] = useState(false)
+  const [addingId, setAddingId] = useState<string | null>(null)
   const list = items && items.length ? items : []
   const visible = expanded ? list : list.slice(0, 3)
   const hasMore = list.length > 3
-  // 用 item_id 索引逐件判定行：有失败件时徽标才亮 ❌，全过亮 ✅，n/a 不显示
   const rowsById = useMemo(() => {
     const map = new Map<string, Satisfaction['items'][number]>()
     ;(satisfaction?.items || []).forEach(r => { if (r.item_id) map.set(r.item_id, r) })
     return map
   }, [satisfaction])
-  const badgeFor = (item: PlanItem): { icon: string; color: string; title: string } | null => {
+  // P1-④ 共性上提：全组每件都 ✅ 的约束只在顶部写一次，单品行不重复刷屏
+  const commonIds = useMemo(() => {
+    const rows = (satisfaction?.items || []).filter(r => list.some(it => it.id === r.item_id))
+    const common = new Set<string>()
+    if (rows.length < 2) return common
+    for (const r of rows[0].results || []) {
+      if (r.status !== 'pass') continue
+      const allPass = rows.every(row => row.results.find(x => x.constraint_id === r.constraint_id)?.status === 'pass')
+      if (allPass) common.add(r.constraint_id)
+    }
+    return common
+  }, [satisfaction, list])
+  const commonLabels = useMemo(() => {
+    const contentById = new Map((satisfaction?.constraints || []).map(c => [c.constraint_id, c.content]))
+    return Array.from(commonIds).map(id => contentById.get(id)).filter((t): t is string => !!t)
+  }, [commonIds, satisfaction])
+  // 逐件标签：pass → ✅ / taboo 违规 → ❌ / 其余 fail 与 n/a 不当红叉（语义是「判不了」）
+  const chipsFor = (item: PlanItem) => {
     const row = item.id ? rowsById.get(item.id) : undefined
     if (!row) return null
-    const failed = (row.results || []).filter(r => r.status === 'fail')
-    const judged = (row.results || []).filter(r => r.status !== 'n/a')
-    if (failed.length > 0) {
-      return {
-        icon: '❌', color: '#FCA5A5',
-        title: failed.map(f => `${f.label}：${f.evidence}`).join('\n'),
-      }
-    }
-    if (judged.length > 0) {
-      return {
-        icon: '✅', color: '#6EE7B7',
-        title: judged.map(f => `${f.label}：${f.evidence}`).join('\n'),
-      }
-    }
-    return null
+    const results = row.results || []
+    const chips = results
+      .filter(r => !commonIds.has(r.constraint_id))
+      .filter(r => r.status === 'pass' || r.status === 'n/a' || (r.type === 'taboo' && r.status === 'fail'))
+    const hasEvidence = results.some(r => r.status === 'pass' || (r.type === 'taboo' && r.status === 'fail'))
+    return { chips, hasEvidence }
   }
 
   return (
@@ -599,18 +701,18 @@ function ItemList({ items, satisfaction }: { items: PlanItem[]; satisfaction?: S
         包含商品 ({list.length})
       </div>
       {list.length === 0 && <div style={{ fontSize: 10, color: '#6B7280', fontStyle: 'italic' }}>暂无商品</div>}
+      {commonLabels.length > 0 && (
+        <div style={{ fontSize: 9, color: '#6EE7B7', marginBottom: 4, paddingLeft: 8 }}>
+          全部 {list.length} 件：{commonLabels.map(t => `✅ ${t}`).join(' · ')}
+        </div>
+      )}
       {visible.map((item, idx) => {
-        const badge = badgeFor(item)
+        const chips = chipsFor(item)
         return (
         <div
           key={item.id || idx}
           style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#D1D5DB', marginBottom: 4, paddingLeft: 8, borderLeft: '2px solid #4B5563' }}
         >
-          {badge && (
-            <span title={badge.title} style={{ color: badge.color, fontSize: 11, flexShrink: 0, cursor: 'help' }}>
-              {badge.icon}
-            </span>
-          )}
           {item.image_url ? (
             <img
               src={item.image_url}
@@ -629,6 +731,28 @@ function ItemList({ items, satisfaction }: { items: PlanItem[]; satisfaction?: S
                 <span style={{ color: '#FBBF24', marginLeft: 4, fontSize: 10 }}>×{item.quantity}</span>
               )}
             </span>
+            {/* P0-1 逐条标签：只说「这条命中了什么」，不打「这件不行」的总判定 */}
+            {chips && (
+              <span style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                {chips.hasEvidence ? (
+                  chips.chips.map(c => {
+                    const icon = c.status === 'pass' ? '✅' : c.type === 'taboo' && c.status === 'fail' ? '❌' : '❔'
+                    const color = icon === '✅' ? '#6EE7B7' : icon === '❌' ? '#FCA5A5' : '#9CA3AF'
+                    return (
+                      <span
+                        key={c.constraint_id}
+                        title={c.evidence}
+                        style={{ fontSize: 9, color, border: `1px solid ${color}44`, borderRadius: 99, padding: '0 6px', whiteSpace: 'nowrap' }}
+                      >
+                        {icon} {c.label}
+                      </span>
+                    )
+                  })
+                ) : (
+                  <span style={{ fontSize: 9, color: '#6B7280', fontStyle: 'italic' }}>未命中任何可判定约束</span>
+                )}
+              </span>
+            )}
             {(item.match_score != null || (item.tags && item.tags.length > 0)) && (
               <span style={{ display: 'block', fontSize: 9, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {item.match_score != null ? `关键词匹配 ${Math.round((item.match_score || 0) * 100) / 100}` : ''}
@@ -639,6 +763,26 @@ function ItemList({ items, satisfaction }: { items: PlanItem[]; satisfaction?: S
           <span style={{ color: '#E5E7EB', fontWeight: 600, flexShrink: 0 }}>
             {fmtUsd(item.subtotal ?? item.price * (item.quantity || 1))}
           </span>
+          {onAddItem && (
+            <button
+              onClick={async e => {
+                e.stopPropagation()
+                if (addingId || !item.id) return
+                setAddingId(item.id)
+                try { await onAddItem(item) } finally { setAddingId(null) }
+              }}
+              disabled={!item.id || addingId !== null}
+              title={item.id ? `只加入「${item.name}」这一件到购物车` : '该商品缺少 id，无法单独加购'}
+              style={{
+                flexShrink: 0, width: 20, height: 20, borderRadius: 6, cursor: item.id && !addingId ? 'pointer' : 'not-allowed',
+                border: '1px solid #3B82F6', background: '#1E3A5F', color: '#93C5FD',
+                fontSize: 12, fontWeight: 700, lineHeight: 1, padding: 0,
+                opacity: item.id && !addingId ? 1 : 0.45,
+              }}
+            >
+              {addingId === item.id ? '…' : '＋'}
+            </button>
+          )}
         </div>
         )
       })}
@@ -654,13 +798,97 @@ function ItemList({ items, satisfaction }: { items: PlanItem[]; satisfaction?: S
   )
 }
 
+// 无可行方案卡片：把"为什么无解"讲清楚 —— 回退说明 + 逐条约束诊断 + 可操作的调整建议。
+// 红线：无解就是无解，绝不为了"页面上有东西"塞一堆无关商品冒充方案。
+function InfeasibleCard({
+  fallback,
+  satisfaction,
+  scope,
+  retrieval,
+  onRegenerate,
+  regenerating,
+}: {
+  fallback?: PlansFallbackInfo
+  satisfaction?: Satisfaction
+  scope?: string
+  retrieval?: PlansResponse['retrieval']
+  onRegenerate?: () => void
+  regenerating?: boolean
+}) {
+  const suggestions = fallback?.suggestions || []
+  const channel3Down = retrieval?.channel3_status === 'error'
+  return (
+    <div style={{ background: '#0f172a', borderRadius: 12, padding: 16, border: '1px solid #7F1D1D' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#FCD34D' }}>
+          ⚠️ 当前约束下没有可行组合
+        </h3>
+        {onRegenerate && (
+          <button
+            onClick={onRegenerate}
+            disabled={regenerating}
+            style={{
+              fontSize: 11, padding: '4px 10px', borderRadius: 99,
+              border: '1px solid #3B82F6', background: 'transparent',
+              color: regenerating ? '#6B7280' : '#93C5FD',
+              cursor: regenerating ? 'default' : 'pointer', fontWeight: 700,
+            }}
+          >
+            {regenerating ? '重算中…' : '🔄 重新生成方案'}
+          </button>
+        )}
+      </div>
+
+      <div style={{ fontSize: 12, color: '#D1D5DB', whiteSpace: 'pre-line', lineHeight: 1.7 }}>
+        {fallback?.message || '找不到同时满足这些条件的商品。'}
+      </div>
+
+      {/* 检索证据：检索词 / 数据源 / 候选规模，让"无解"可被核对 */}
+      {(retrieval?.search_query || retrieval?.source) && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#6B7280', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {retrieval?.search_query && <span>实际检索词「{retrieval.search_query}」</span>}
+          {retrieval?.source && <span>数据源 {dataSourceLabel(retrieval.source)}</span>}
+          {typeof retrieval?.candidate_count === 'number' && <span>召回 {retrieval.candidate_count} 件</span>}
+          {typeof retrieval?.matched_count === 'number' && <span>命中 {retrieval.matched_count} 件</span>}
+          {typeof retrieval?.filtered_count === 'number' && retrieval.filtered_count > 0 && (
+            <span>过滤 {retrieval.filtered_count} 件</span>
+          )}
+          {channel3Down && <span style={{ color: '#F87171' }}>赞助商检索暂时不可用（已降级）</span>}
+        </div>
+      )}
+
+      {satisfaction && (
+        <div style={{ marginTop: 12 }}>
+          <SatisfactionBlock satisfaction={satisfaction} scope={scope} />
+        </div>
+      )}
+
+      {suggestions.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ fontSize: 11, color: '#93C5FD', fontWeight: 700, marginBottom: 4 }}>可以试试</div>
+          {suggestions.map((s, i) => (
+            <div key={i} style={{ fontSize: 11, color: '#D1D5DB', lineHeight: 1.6 }}>
+              · <b>{s.action}</b>：{s.detail}
+              {s.estimated_impact ? `（${s.estimated_impact}）` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // 约束判定块：组合级 N/M + 逐条 ✅/❌/❔，每条都带可复算证据串。
 // 红线：unknown 绝不显示成 ✅；❌ 默认最多 2 条（后端已折叠，这里只提示还有几条）。
-function SatisfactionBlock({ satisfaction }: { satisfaction?: Satisfaction }) {
+// scope='catalog' 表示这份判定是在**候选池全量**上跑的（无解场景的"为什么无解"）。
+function SatisfactionBlock({ satisfaction, scope }: { satisfaction?: Satisfaction; scope?: string }) {
+  const catalogScope = scope === 'catalog'
   if (!satisfaction || !satisfaction.judgeable) {
     return (
       <div style={{ marginBottom: 10, fontSize: 10, color: '#6B7280', fontStyle: 'italic' }}>
-        本次需求没有可自动判定的硬约束（预算/环保/品类等），下方商品按检索相关度给出。
+        {catalogScope
+          ? '本次需求没有可自动判定的约束，无法用商品数据解释"为什么无解"——请人工核对商品目录。'
+          : '本次需求没有可自动判定的硬约束（预算/环保/品类等），下方商品按检索相关度给出。'}
       </div>
     )
   }
@@ -674,7 +902,9 @@ function SatisfactionBlock({ satisfaction }: { satisfaction?: Satisfaction }) {
   return (
     <div style={{ marginBottom: 10, background: '#0b1220', border: '1px solid #374151', borderRadius: 6, padding: 8 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: '#93C5FD' }}>📋 约束判定</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#93C5FD' }}>
+          📋 约束判定{catalogScope ? '（候选池覆盖）' : ''}
+        </span>
         <span style={{ fontSize: 10, color: satisfaction.failed > 0 ? '#FCD34D' : '#6EE7B7', fontWeight: 600 }}>
           {satisfaction.headline}
         </span>
@@ -687,7 +917,7 @@ function SatisfactionBlock({ satisfaction }: { satisfaction?: Satisfaction }) {
             <span style={{ minWidth: 0 }}>
               <span style={{ color: '#D1D5DB' }}>{c.content || c.constraint_id}</span>
               {(c.evidence || c.reason) && (
-                <span style={{ color: '#6B7280' }}>　{c.evidence || c.reason}</span>
+                <span style={{ color: '#6B7280' }}>{c.evidence || c.reason}</span>
               )}
             </span>
           </div>

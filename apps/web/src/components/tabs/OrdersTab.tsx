@@ -115,7 +115,7 @@ export function OrdersTab({ sessionId, initialOrderId }: Props) {
           {polling && <span style={{ fontSize: 10, color: '#C084FC' }}>● 支付中 · 每 4s 自动刷新</span>}
         </div>
         <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 5 }}>
-          仅展示团购 OrderRecord；“Agent 授权边界”演示订单不入档。
+          团购与「Agent 授权边界」演示产生的订单都会进入本档案。
         </div>
       </div>
 

@@ -66,12 +66,19 @@ function AppShell() {
     setComposerBusy(true)
     setError('')
     // 搜索即推荐：提交后停在同一个页面（不用跳任何 Tab），下拉直接看方案
-    setIntentQuery(text)
+    // 必须 trim 后存：后端 submit_intent 会 .strip()，若这里存原文，首尾空格会让
+    // PlansTab 的快照校验永远不通过 → 方案生成了页面还停在「⏳ 等待生成方案」。
+    const trimmed = text.trim()
+    if (!trimmed) {
+      setComposerBusy(false)
+      return
+    }
+    setIntentQuery(trimmed)
     setActivePanel('shop')
     // 新需求 = 新方案：旧的"已选择"必须清掉，否则新方案一出来就显示"已选择"
     setSelectedPlanId(null)
     try {
-      const res = await submitIntent(sessionId, text)
+      const res = await submitIntent(sessionId, trimmed)
       setIntentMode(res.mode)
       setPlanRefreshKey(k => k + 1)
       // 约束看板随写随显：通知它立即重拉，不等 3s 轮询

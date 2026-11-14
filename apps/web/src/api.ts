@@ -171,6 +171,14 @@ export interface ConstraintsResponse {
  */
 const ensureInflight = new Map<string, Promise<void>>()
 
+/**
+ * 会话自举：没有就建，有就复用。
+ *
+ * 注意这里**只判断 exists，不判断属主**。清理残留不是前端的职责 ——
+ * 会话有没有"过期"由后端读路径惰性判定（session_state.is_session_expired，
+ * 滑动窗口 last_active_at + SESSION_TTL_SECONDS）。过期后 status 直接返回
+ * exists=false，这里自然走到下面新建分支，前端不需要知道 TTL 的存在。
+ */
 export function ensureSession(sessionId: string, userId = 'demo-user'): Promise<void> {
   if (!sessionId) return Promise.resolve()
   const cached = ensureInflight.get(sessionId)
@@ -210,13 +218,24 @@ function isSessionMissing(detail: unknown): boolean {
   return typeof detail === 'string' && detail.trim() === 'Session not found'
 }
 
-async function withSessionRetry(sessionId: string, url: string): Promise<Response> {
-  const first = await fetch(url)
+async function fetchWithTimeout(url: string, timeoutMs?: number): Promise<Response> {
+  if (!timeoutMs) return fetch(url)
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, { signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function withSessionRetry(sessionId: string, url: string, timeoutMs?: number): Promise<Response> {
+  const first = await fetchWithTimeout(url, timeoutMs)
   if (first.status !== 404) return first
   const body = await first.clone().json().catch(() => null)
   if (!isSessionMissing((body as { detail?: unknown } | null)?.detail)) return first
   await ensureSession(sessionId)
-  return await fetch(url)
+  return await fetchWithTimeout(url, timeoutMs)
 }
 
 export async function fetchConstraints(sessionId: string): Promise<ConstraintsResponse> {
@@ -300,7 +319,12 @@ export interface RetrievalEvidence {
   source?: string
   candidate_count?: number
   matched_count?: number
-  /** 检索层诚实说明（如命中全不相干 → 已回落本地目录 / 已过滤 N 件） */
+  /**
+   * 过滤数（候选 − 命中，后端强制守恒，可心算核对）。
+   * 2026-11-14 起口径单一来源：candidate=原始召回条数 / matched=约束预筛后 / filtered=candidate−matched。
+   */
+  filtered_count?: number
+  /** 检索层诚实说明（如命中全不相干 → 已回落本地目录），不含数字口径。 */
   note?: string
   /**
    * Channel3 三态（进字段，不只进文案）：
@@ -345,6 +369,13 @@ export interface Plan {
   sacrificed_members?: string[]
   /** 约束满足度总账：组合级 N/M 条 + 逐条 ✅/❌/❔ + 证据串（satisfaction.py 纯计算）。 */
   satisfaction?: Satisfaction
+  /** 无明确预算时「最贴题」超软上限（最省方案 × 3）：前端折叠到「超预算」区，不冒充推荐。 */
+  soft_cap_exceeded?: boolean
+  soft_cap_note?: string
+  /** 数量诚实（评审盯点②）：需求 N 件但候选池只凑得出 M 件（M<N）时置位 —— 不冒充「需求已满足」。 */
+  feasible?: boolean
+  quantity_shortfall?: boolean
+  quantity_note?: string
 }
 
 /** 逐条约束的判定：sat=满足 / unsat=不满足 / unknown=数据判不了（绝不假装 ✅）。 */
@@ -455,6 +486,16 @@ export interface ComparisonPareto {
   relevance_b?: number
 }
 
+/** 无可行方案时的说明与建议（后端 generate_fallback_message 生成）。 */
+export interface PlansFallbackInfo {
+  ok?: boolean
+  status?: string
+  message?: string
+  reason?: string
+  suggestions?: Array<{ action?: string; detail?: string; estimated_impact?: string }>
+  [key: string]: unknown
+}
+
 export interface PlansResponse {
   feasible: boolean
   reason?: string
@@ -462,13 +503,16 @@ export interface PlansResponse {
   plan_a?: Plan | null
   plan_b?: Plan | null
   data_source?: string
-  fallback?: Record<string, unknown>
+  fallback?: PlansFallbackInfo
   comparison?: PlansComparison
   budget_limit?: number
   constraint_count?: number
   intent_query?: string
   intent_mode?: 'single' | 'group'
   retrieval?: RetrievalEvidence
+  /** 无解时的约束诊断（satisfaction_scope='catalog'：在候选池全量上判的覆盖情况）。 */
+  satisfaction?: Satisfaction
+  satisfaction_scope?: 'catalog' | string
   [key: string]: unknown
 }
 
@@ -648,9 +692,12 @@ export async function regeneratePlans(sessionId: string): Promise<{ ok: boolean;
 }
 
 export async function fetchPlans(sessionId: string): Promise<PlansResponse> {
+  // 超时兜底：后端生成最坏约 8s（Channel3 硬超时）+ 本地目录，25s 覆盖重试余量；
+  // 超时抛错 → PlansTab 轮询会按「网络抖动」节奏继续，不会无限白屏。
   const resp = await withSessionRetry(
     sessionId,
     `${API_BASE}/plans?session_id=${encodeURIComponent(sessionId)}`,
+    25000,
   )
   if (!resp.ok) {
     const body = await resp.json().catch(() => null)
@@ -752,6 +799,18 @@ export interface CartMutationResponse {
   new_total?: number
   cart: CartResponse
   guardrail?: CartGuardrail
+}
+
+export async function addCartItem(sessionId: string, itemId: string): Promise<CartMutationResponse> {
+  const resp = await fetch(
+    `${API_BASE}/cart/items/${encodeURIComponent(itemId)}?session_id=${encodeURIComponent(sessionId)}`,
+    { method: 'POST' },
+  )
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null)
+    throw new Error(detailMessage(body?.detail, `Add cart item failed: ${resp.status}`))
+  }
+  return await resp.json()
 }
 
 export async function updateCartItemQuantity(

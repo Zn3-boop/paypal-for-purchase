@@ -154,7 +154,7 @@ export function ConstraintsDashboard({ sessionId }: Props) {
             animation: hasConflicts ? 'pulse 1s infinite' : 'none'
           }} />
           <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: hasConflicts ? '#EF4444' : '#10B981' }}>
-            {hasConflicts ? '⚠️ 存在约束冲突' : '✅ 所有约束满足'}
+            {hasConflicts ? '⚠️ 存在约束冲突' : '约束已就绪'}
           </h3>
         </div>
         <button

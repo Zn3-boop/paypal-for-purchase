@@ -5,9 +5,23 @@ export function EventDataSummary({ log }: { log: AuditLogEntry }) {
   const d = log.data || {}
   let text: string
   switch (log.event) {
-    case 'constraint_changed':
-      text = `${d.change_type || ''} ${d.constraint_type || ''} ${d.description || d.new_value || ''}`.trim()
+    case 'constraint_changed': {
+      // data: { change_type, constraint_id, old_value?, new_value? }，值都是 dict
+      // （constraint.to_dict()）。绝不能把 dict 直接拼进字符串 → [object Object]。
+      const changeLabel =
+        d.change_type === 'removed' ? '移除' :
+        d.change_type === 'modified' ? '修改' :
+        d.change_type === 'added' ? '新增' : (d.change_type || '约束变更')
+      const v = d.change_type === 'removed' ? d.old_value : d.new_value
+      const content = v && typeof v === 'object' ? String((v as { content?: unknown }).content ?? (v as { id?: unknown }).id ?? '') : String(v ?? '')
+      const ctype = v && typeof v === 'object' ? String((v as { type?: unknown }).type ?? '') : ''
+      const typeLabel = ctype === 'budget' ? '预算' : ctype === 'functional' ? '功能' : ctype === 'taboo' ? '禁忌' : ctype === 'preference' ? '偏好' : ctype
+      const isHard = v && typeof v === 'object' ? Boolean((v as { hard?: unknown }).hard) : false
+      const numeric = v && typeof v === 'object' ? (v as { numeric_value?: unknown }).numeric_value : undefined
+      const detail = [typeLabel, isHard ? '硬' : '软', typeof numeric === 'number' ? `$${numeric}` : ''].filter(Boolean).join('·')
+      text = `${changeLabel}「${content}」${detail ? `（${detail}）` : ''}`.trim()
       break
+    }
     case 'plan_generated':
       text = `方案 ${d.plan_id || '?'} · ${d.item_count ?? '?'} 件 · ${d.total ?? '?'} 元`
       break
