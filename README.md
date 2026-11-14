@@ -337,9 +337,32 @@ This prototype supports two interchangeable data sources for demo:
 1. Channel3 API (official hackathon sponsor) - real product search, normalized into the local item shape.
 2. Local mock dataset (`catalog_k1`), used as an honest fallback when Channel3 is unavailable or returns nothing relevant.
 
+Market & locale: `CHANNEL3_LANGUAGE / CHANNEL3_COUNTRY / CHANNEL3_CURRENCY` are passed to the SDK
+(defaults: SDK inference → `en` / `US` / `USD`). Storefront data is primarily US/EU merchants — this
+is **not** a sourcing channel for domestic CN merchandise, and the fallback path says so honestly
+instead of faking a match.
+
 Channel3 results are filtered for relevance to the request, same-name + same-price duplicates are
 dropped, and items that came back but did not match are shown *separately* as "closest results"
 (`sponsor_related`) - they never enter a plan as if they were matches.
+
+## Disclaimer & Boundaries
+
+> 商品信息、库存与价格以 Channel3 检索时点快照及商家页面为准；最终成交金额以 PayPal 结算页为准。
+> 本工具不自动发起支付，付款需由用户在 PayPal 页面确认。
+>
+> Product info, availability and prices are snapshots taken at Channel3 search time and the merchant
+> site; the final charged amount is whatever the PayPal checkout page shows. This tool never initiates
+> a payment on its own — the user always confirms payment on the PayPal page.
+
+- **防篡改 ≠ 防波动**（两个概念分开表述）：订单 **金额被篡改**（下单金额 ≠ 捕获金额）会触发
+  `payment_amount_mismatch` 审计并禁止标记 paid（已有守卫）；但 **价格自身的市场波动**（检索到
+  支付之间的差价）当前不做自动拦截，只做窗口提示（「接近预算上限，价格波动可能超支」），
+  实际成交以 PayPal 结算页为准。
+- **运费 / 发货地 / 退换政策**：Channel3 offer 不含这三个字段。每件商品通过
+  「在商家页面查看」（offer url/domain）跳转原始商家页核对；界面不编造这些字段。
+- **缺货 / 下架窗口**：检索成功到支付完成之间商品可能下架/缺货，当前 demo 不自动重校验
+  （roadmap：支付前 offer 重校验 + 价差超阈值拦截）。
 
 ## Storage: JSONL + PostgreSQL dual-write
 
@@ -434,6 +457,9 @@ demonstrates real restart-proof persistence rather than a page reload. Before fi
 | `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET` | - | merchant app credentials from the PayPal Developer Dashboard (Business account); required only for `PAYMENT_MODE=real` |
 | `PAYPAL_SANDBOX_API` | `https://api-m.sandbox.paypal.com` | sandbox API base |
 | `CHANNEL3_API_KEY` | - | Channel3 real product search; empty → honest fallback to local `catalog_k1` |
+| `CHANNEL3_LANGUAGE` | (SDK 推断) | Channel3 检索语言（ISO 639-1，如 `en`/`de`）；留空走 SDK 默认推断 |
+| `CHANNEL3_COUNTRY` | (SDK 推断) | Channel3 市场（ISO 3166-1 alpha-2，如 `US`/`GB`/`DE`）；决定商品地区与币种推断 |
+| `CHANNEL3_CURRENCY` | (SDK 推断) | Channel3 报价币种（ISO 4217，如 `USD`/`EUR`）；留空由 country 推断 |
 | `CHANNEL3_DNS_PIN` | (empty) | 演示机 DNS 被污染时的应急：逗号分隔的真实 IP 列表，应用层固定 connect 目标（TLS/SNI/Host 仍按域名校验，不关校验、无需管理员权限）；正常网络留空 |
 | `DATABASE_URL` | (empty) | PostgreSQL 连接串（如 `postgresql://postgres:xxx@localhost:5432/ecv_paypal`）。设置后订单/审计**双写** JSONL + PG；留空 → 纯 JSONL 模式（CI/离线测试默认） |
 

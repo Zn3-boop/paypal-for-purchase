@@ -227,6 +227,17 @@ class Channel3SearchClient:
                 "max_retries": self._config.max_retries,
                 "httpx_client": http_client,
             }
+            # P0-1（2026-11-14）：CHANNEL3_LANGUAGE/COUNTRY/CURRENCY 三个配置位此前
+            # 从未透传给 SDK，实际一直跑在 SDK 默认 en/US/USD（写了不用）。
+            # SDK 构造级参数：**非空才传** —— 未配置时保留 SDK 默认推断
+            # （country→currency/language 推断），配了才真正生效。
+            for key, value in (
+                ("language", self._config.language),
+                ("country", self._config.country),
+                ("currency", self._config.currency),
+            ):
+                if value:
+                    kwargs[key] = value
             if self._config.base_url:
                 kwargs["base_url"] = self._config.base_url
             self._sdks[index] = Channel3(**kwargs)
@@ -344,12 +355,21 @@ def _normalize_product(p: Any) -> dict[str, Any]:
         offers = list(getattr(p, "offers", None) or [])
         price = 0.0
         currency = _DEFAULT_CURRENCY
+        offer_url = ""
+        domain = ""
+        condition = None
         if offers:
             first = offers[0]
             price_obj = getattr(first, "price", None)
             if price_obj:
                 price = float(getattr(price_obj, "price", 0.0) or 0.0)
                 currency = str(getattr(price_obj, "currency", None) or _DEFAULT_CURRENCY)
+            # P0-3（2026-11-14）：商家外链（url/domain）与商品成色（condition）必须保留 ——
+            # 否则用户无法跳回原始商家页核对运费/发货地/退换政策（SDK 不提供这三个字段，
+            # 我们能做的就是给出可点击的商家原始页，而不是在界面上编造）。
+            offer_url = str(getattr(first, "url", "") or "")
+            domain = str(getattr(first, "domain", "") or "")
+            condition = getattr(first, "condition", None) or None
         tags = list(getattr(p, "key_features", None) or [])
         for brand in list(getattr(p, "brands", None) or []):
             name = getattr(brand, "name", None)
@@ -382,6 +402,9 @@ def _normalize_product(p: Any) -> dict[str, Any]:
             "tags": [str(t) for t in tags],
             "description": getattr(p, "description", "") or "",
             "image_url": image_url,
+            "offer_url": offer_url,
+            "domain": domain,
+            "condition": condition,
             "source": _SOURCE,
         }
     except Exception as exc:

@@ -408,6 +408,17 @@ export function PlansTab({
                 <div style={{ fontSize: 11, color: '#E5E7EB', fontWeight: 600, lineHeight: 1.35, maxHeight: 44, overflow: 'hidden' }}>
                   {sp.name}
                 </div>
+                {(sp as any).offer_url && (
+                  <a
+                    href={(sp as any).offer_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`在商家页面查看${(sp as any).domain ? `（${(sp as any).domain}）` : ''}`}
+                    style={{ color: '#93C5FD', fontSize: 9, textDecoration: 'none' }}
+                  >
+                    ↗ 商家页查看
+                  </a>
+                )}
                 <div style={{ fontSize: 12, color: '#6EE7B7', fontWeight: 700 }}>{fmtUsd(sp.price)}</div>
                 {sp.category && <div style={{ fontSize: 9, color: '#6B7280' }}>{sp.category}</div>}
                 {(sp.tags || []).slice(0, 2).length > 0 && (
@@ -727,6 +738,18 @@ function ItemList({ items, satisfaction, onAddItem }: { items: PlanItem[]; satis
           <span style={{ flex: 1, minWidth: 0 }}>
             <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {item.name}
+              {(item as any).offer_url ? (
+                <a
+                  href={(item as any).offer_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  title={`在商家页面查看${(item as any).domain ? `（${(item as any).domain}）` : ''}`}
+                  style={{ color: '#93C5FD', marginLeft: 6, textDecoration: 'none', fontSize: 10 }}
+                >
+                  ↗ 商家页
+                </a>
+              ) : null}
               {item.quantity > 1 && (
                 <span style={{ color: '#FBBF24', marginLeft: 4, fontSize: 10 }}>×{item.quantity}</span>
               )}
@@ -1159,6 +1182,9 @@ function SplitConfirmationModal({ sessionId, plan, mode, onClose }: {
           {editError && <div style={{ fontSize: 11, color: '#FCA5A5', marginTop: 6 }}>⚠️ {editError}</div>}
         </div>
 
+        <div style={{ marginTop: 12, fontSize: 10, color: '#6B7280', lineHeight: 1.5 }}>
+          商品库存与价格以检索时点及商家页为准；最终金额以 PayPal 结算页为准，本工具不自动发起支付。
+        </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
           <button
             onClick={onClose}

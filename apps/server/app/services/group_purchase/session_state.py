@@ -120,6 +120,11 @@ class PlanItem:
     tags: list[str] = field(default_factory=list)
     match_score: float = 0.0
     match_tags: list[str] = field(default_factory=list)
+    # P0-3（2026-11-14）：商家原始外链（offer url/domain/condition）——
+    # 用户可跳回商家页核对运费/发货地/退换政策，界面不编造这些字段。
+    offer_url: str = ""
+    domain: str = ""
+    condition: str | None = None
     
     def __post_init__(self):
         if self.subtotal == 0.0:
@@ -140,6 +145,9 @@ class PlanItem:
             "tags": self.tags,
             "match_score": self.match_score,
             "match_tags": self.match_tags,
+            "offer_url": self.offer_url,
+            "domain": self.domain,
+            "condition": self.condition,
         }
     
     @classmethod
@@ -158,6 +166,9 @@ class PlanItem:
             tags=list(data.get("tags") or []),
             match_score=float(data.get("match_score") or 0),
             match_tags=list(data.get("match_tags") or []),
+            offer_url=data.get("offer_url", ""),
+            domain=data.get("domain", ""),
+            condition=data.get("condition"),
         )
 
 

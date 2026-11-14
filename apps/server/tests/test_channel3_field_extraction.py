@@ -95,6 +95,23 @@ class TestNormalizeProductKeepsStructuredEvidence:
         out = _normalize_product(p)
         assert out["tags"] == ["Mug"]
         assert "materials" not in out and "structured_attributes" not in out
+
+    def test_offer_url_domain_condition_preserved(self):
+        """P0-3：归一化必须保留首个 offer 的商家外链（url/domain/condition），
+        否则用户无法跳回原始商家页核对运费/发货地/退换政策。"""
+        p = _product(**_item_kwargs(
+            name="Merchant Sneaker", price=30.0, desc="Canvas sneaker",
+            materials=["canvas"], attrs={},
+        ))
+        p.offers = [SimpleNamespace(
+            url="https://merchant.example/p/42", domain="merchant.example",
+            price=SimpleNamespace(price=30.0, currency="USD"),
+            condition="new",
+        )]
+        out = _normalize_product(p)
+        assert out["offer_url"] == "https://merchant.example/p/42", out
+        assert out["domain"] == "merchant.example", out
+        assert out["condition"] == "new", out
 # ── 二档：真实字段 → evaluate 翻 ✅（材质/颜色/版型/数字）────────────
 class TestRealFieldsTurnUnknownIntoSat:
     def test_navy_jacket_navy_structured_and_hip_length_all_sat(self):
