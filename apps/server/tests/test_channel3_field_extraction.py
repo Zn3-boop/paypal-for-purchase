@@ -25,7 +25,7 @@ os.environ.setdefault("PAYMENT_MODE", "mock")
 
 from app.services.channel3.client import _normalize_product  # noqa: E402
 from app.services.group_purchase.constraints import Constraint  # noqa: E402
-from app.services.group_purchase.satisfaction import STATUS_SAT, evaluate  # noqa: E402
+from app.services.group_purchase.satisfaction import STATUS_SAT, STATUS_UNSAT, evaluate  # noqa: E402
 
 
 def _product(**kw) -> SimpleNamespace:
@@ -181,3 +181,141 @@ class TestHonestyBoundary:
         )))
         v = evaluate([_c(1, "functional", "米白色")], [item])["constraints"][0]
         assert v["status"] != STATUS_SAT, "无颜色证据时不可硬判 ✅"
+
+
+# ── 四档：皮鞋场景词表补全 + 哑光反证（2026-11-14 实测）──────────────
+_LOW_PUCKER = dict(
+    name="LOW PUCKER PUMP 45", price=1400.0,
+    desc="Shiny oxblood leather finish / Rounded toe / Elasticated topline",
+    materials=["leather"],
+    attrs={},
+)
+
+
+class TestShoeVocabularyAndMatteCounterEvidence:
+    def test_shoe_constraint_matches_pump(self):
+        """真实商品 LOW PUCKER PUMP 45 名称只写 PUMP 不写 shoes —— 「鞋」变体现含 pump，
+        不再 0/4（修前整批候选 ❔ 的根因之一）。"""
+        item = _normalize_product(_product(**_item_kwargs(**_LOW_PUCKER)))
+        v = evaluate([_c(1, "functional", "鞋")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "pump" in v["evidence"].lower()
+
+    def test_leather_shoe_constraint_matches_leather_finish(self):
+        """约束=皮鞋（整词）：商品 desc 写 'leather finish' → 命中，不再只能靠裸 shoes。"""
+        item = _normalize_product(_product(**_item_kwargs(**_LOW_PUCKER)))
+        v = evaluate([_c(1, "functional", "皮鞋")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "leather finish" in v["evidence"].lower()
+
+    def test_matte_contradicted_by_shiny(self):
+        """约束=哑光，商品明确写 Shiny → 确证违反（❌），而不是「无法判定」。
+        商品自己说了是亮面，这比 ❔ 更诚实。"""
+        item = _normalize_product(_product(**_item_kwargs(**_LOW_PUCKER)))
+        v = evaluate([_c(1, "functional", "哑光")], [item])["constraints"][0]
+        assert v["status"] == "unsat", v["reason"]
+        assert "shiny" in v["evidence"].lower()
+
+    def test_matte_without_counter_evidence_stays_unknown(self):
+        """约束=哑光，商品既无 matte 也无 shiny → 仍是 ❔（不硬判）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="Plain Mug", price=5.0, desc="Simple ceramic mug",
+            materials=["ceramic"], attrs={"pattern": ["Solid"]},
+        )))
+        v = evaluate([_c(1, "functional", "哑光")], [item])["constraints"][0]
+        assert v["status"] == "unknown", v["reason"]
+
+    def test_shoe_constraint_still_matches_classic_words(self):
+        """回归：扩充后的「鞋」词表不丢原来的 shoes/sneakers/boots。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="Running Sneakers", price=30.0, desc="Comfortable sneakers for daily wear",
+            materials=["canvas"], attrs={},
+        )))
+        v = evaluate([_c(1, "functional", "鞋")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+
+    def test_low_heel_matches_low_heel_shoes(self):
+        """真实商品 'Chic Mary Jane Low Heel Shoes' → 低跟 ✅（low heel 词条原样可用）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="Chic Mary Jane Low Heel Shoes", price=39.99,
+            desc="Vintage-inspired flats with a low heel.",
+            materials=["Patent Leather", "Synthetic"], attrs={},
+        )))
+        v = evaluate([_c(1, "functional", "低跟")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "low heel" in v["evidence"].lower()
+
+
+# ── 五档：容量数值语义 + 快充词表（2026-11-14 实测新场景）──────────────
+class TestCapacityNumericSemantics:
+    def test_cup_40oz_geq_500ml_with_conversion(self):
+        """保温杯：标题 40oz ≈ 1183ml ≥ 500ml → ✅ 带换算证据（不再因文本无 '500ml' 判 ❔）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="Wellness 40oz. Double Wall Vine Stripe Travel Cup", price=14.99,
+            desc="Double-wall insulated travel cup, spill-resistant lid.",
+            materials=["stainless steel"], attrs={},
+        )))
+        v = evaluate([_c(1, "functional", "500ml")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "40oz" in v["evidence"], v["evidence"]
+        assert "1183" in v["evidence"], v["evidence"]
+
+    def test_power_bank_headline_capacity_is_the_basis(self):
+        """充电宝 10000mAh：判定依据标题主容量 30000mAh（≥ 10000mAh），
+        而不是 key_features 里'本系列也有 10000mAh'的家族描述（修前假阳性）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="30000mAh Fast Charging Power Bank PD18W Portable Charger", price=74.09,
+            desc="SUPER FAST CHARGING: 10000mAh supports PD18W fast charging, "
+                 "while 20000mAh/30000mAh support PD22.5W.",
+            materials=["plastic"], attrs={},
+            features=["10000mAh supports PD18W fast charging"],
+        )))
+        v = evaluate([_c(1, "functional", "10000mAh")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "30000mAh" in v["evidence"] and "10000mAh" in v["evidence"], v["evidence"]
+        assert "主容量" in v["evidence"]
+        assert "10000mAh supports PD18W" not in v["evidence"], "不允许用家族描述当证据"
+
+    def test_power_bank_below_wanted_is_confirmed_unsat(self):
+        """标题主容量 2000mAh < 需求 10000mAh → ❌（商品自己声明了容量，确证不满足）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="2000mAh Slim Pocket Power Bank", price=9.9,
+            desc="Great for topping up earbuds between charges.",
+            materials=["plastic"], attrs={},
+        )))
+        v = evaluate([_c(1, "functional", "10000mAh")], [item])["constraints"][0]
+        assert v["status"] == STATUS_UNSAT, v["reason"]
+        assert "2000mAh" in v["evidence"] and "10000mAh" in v["evidence"], v["evidence"]
+
+    def test_power_bank_unsat_not_contradicted_by_item_row(self):
+        """组合层 ❌ 时逐件表不得因子串命中标 ✅（同一套容量语义，杜绝自相矛盾）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="2000mAh Slim Pocket Power Bank", price=9.9,
+            desc="Great for topping up earbuds between charges.",
+            materials=["plastic"], attrs={},
+        )))
+        out = evaluate([_c(1, "functional", "10000mAh")], [item])
+        assert out["constraints"][0]["status"] == STATUS_UNSAT
+        row = out["items"][0]["results"][0]
+        assert row["status"] == "fail", row
+
+    def test_fast_charging_vocabulary_matches_fast_charging(self):
+        """「快充」：商品标题 Fast Charging → ✅（修前词表只有 充电/charger，快充恒 ❔）。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="30000mAh Fast Charging Power Bank PD18W Portable Charger", price=74.09,
+            desc="SUPER FAST CHARGING: 10000mAh supports PD18W fast charging.",
+            materials=["plastic"], attrs={},
+        )))
+        v = evaluate([_c(1, "functional", "快充")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "fast charging" in v["evidence"].lower(), v["evidence"]
+
+    def test_no_headline_capacity_falls_back_to_keyword_path(self):
+        """标题无容量时回到关键词路径：desc 里 'A 500ml insulated jar' 仍是可判定证据。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="Thermos Jar", price=20.0, desc="A 500ml insulated jar.",
+            materials=["stainless steel"], attrs={},
+        )))
+        v = evaluate([_c(1, "functional", "500ml")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "500ml" in v["evidence"].lower()

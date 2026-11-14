@@ -95,7 +95,13 @@ SYNONYM_KEYWORDS: dict[str, tuple[str, ...]] = {
     "卫衣": ("卫衣", "hoodie", "sweatshirt"),
     "衬衫": ("衬衫", "shirt", "blouse"),
     "裙": ("裙", "skirt", "dress"),
-    "鞋": ("鞋", "shoes", "sneakers", "boots"),
+    "鞋": ("鞋", "shoe", "shoes", "sneaker", "sneakers", "boot", "boots",
+           "pump", "pumps", "oxford", "oxfords", "loafer", "loafers", "heel", "heels",
+           "sandal", "sandals", "moccasin", "moccasins", "mary jane", "dress shoe", "dress shoes"),
+    # 2026-11-14 实测：真实 Channel3 鞋类商品名/描述写 "Pump"/"Heels"/"Sneaker"/"Mary Jane"，
+    # 很少写裸 shoes。约束「鞋」只认 shoes/sneakers/boots 时，整批候选 0/4 全 ❔（皮鞋场景）。
+    "皮鞋": ("皮鞋", "leather shoes", "leather shoe", "leather upper", "leather finish",
+             "genuine leather", "dress shoes", "dress shoe"),
     "水杯": ("水杯", "water bottle", "bottle", "tumbler", "flask"),
     "背包": ("背包", "backpack", "rucksack"),
     "台灯": ("台灯", "desk lamp", "table lamp"),
@@ -128,6 +134,12 @@ SYNONYM_KEYWORDS: dict[str, tuple[str, ...]] = {
     "移动电源": ("移动电源", "power bank", "powerbank", "portable charger", "battery bank", "external battery"),
     "充电器": ("充电器", "charger", "charging", "power adapter"),
     "便携充电": ("便携充电", "portable charger", "power bank"),
+    # 2026-11-14 实测：充电宝场景「快充」恒 ❔ —— 商品标题明明写 "Fast Charging"，
+    # 词表却只有 充电/charger。fast charging 是快充的直接英文证据，必须收，
+    # 否则就是「查到了却证明不了」（与 10000mAh 是同一场实测的一对缺口）。
+    "快充": ("快充", "fast charging", "fast charge", "quick charging", "quick charge",
+             "super fast charging", "rapid charging", "rapid charge", "pd fast charging",
+             "turbo charge", "turbo charging"),
     "袋子": ("袋子", "bag", "tote", "pouch", "duffel"),
     "帆布包": ("帆布包", "canvas bag", "canvas tote", "canvas backpack", "canvas pouch"),
     "厚实": ("厚实", "rugged", "thick", "heavyweight", "heavy-duty", "substantial", "sturdy", "durable"),
@@ -294,6 +306,57 @@ def _total(items: list[Any]) -> float:
         quantity = int(get("quantity", 1) or 1)
         total += price * quantity
     return round(total, 2)
+
+
+# ── 容量数值语义（2026-11-14 实测）────────────────────────────────────
+# 充电宝「10000mAh」：判定必须基于商品**主容量**（标题里的容量），不能靠
+# key_features 里“本系列也有 10000mAh”这种家族描述 —— 那是假阳性证据。
+# 保温杯「500ml」：商品标题写 40oz（≈1183ml）≥ 500ml → ✅ 带换算证据，
+# 而不是因为文本里没有 "500ml" 字样就判 ❔（数据里有、只是单位不同）。
+_CAPACITY_UNITS: dict[str, tuple[str, float]] = {
+    "ml": ("ml", 1.0),
+    "毫升": ("ml", 1.0),
+    "oz": ("ml", 29.5735),      # 1 美制液体盎司 ≈ 29.5735ml
+    "盎司": ("ml", 29.5735),
+    "mah": ("mah", 1.0),
+    "毫安时": ("mah", 1.0),
+}
+_CAPACITY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ml|毫升|oz|盎司|mah|毫安时)", re.I)
+
+
+def _capacity_of(text: str) -> tuple[float, str, str, str] | None:
+    """需求容量（约束原文）→ (canonical 值, canonical 单位, 人类可读标签, 原单位)。"""
+    m = _CAPACITY_RE.search((text or "").lower())
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2).lower()
+    canon_unit, scale = _CAPACITY_UNITS[unit]
+    label = f"{val:g}{'mAh' if unit in ('mah', '毫安时') else unit}"
+    return val * scale, canon_unit, label, unit
+
+
+def _headline_capacity(item: Any) -> tuple[float, str, str, str] | None:
+    """商品**主容量**：只在标题里找（desc/key_features 可能混入系列说明，不能当主规格）。
+    返回 (canonical 值, 人类可读标签, canonical 单位, 原单位)；标题无容量返回 None。"""
+    name = str(_get(item)("name", "") or "")
+    m = _CAPACITY_RE.search(name.lower())
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2).lower()
+    canon_unit, scale = _CAPACITY_UNITS[unit]
+    label = f"{val:g}{'mAh' if unit in ('mah', '毫安时') else unit}"
+    return val * scale, label, canon_unit, unit
+
+
+def _capacity_verdict_text(p_label: str, p_canon: float, p_canon_unit: str, p_orig_unit: str,
+                           wanted_label: str, wanted_orig_unit: str, ge: bool) -> str:
+    """同一单位直接比；不同单位（oz vs ml）带换算证据，让判定可复算。"""
+    rel = "≥" if ge else "<"
+    if p_orig_unit == wanted_orig_unit:
+        return f"{p_label} {rel} {wanted_label}"
+    return f"{p_label}（≈{p_canon:.0f}{p_canon_unit}）{rel} {wanted_label}"
 
 
 def _keywords(content: str) -> list[str]:
@@ -526,6 +589,28 @@ def _judge_constraint(constraint: Any, items: list[Any], budget_limit: float | N
 
     # ── 功能/品类：名称·品类·标签关键词命中（中英同义扩展）；未命中 → unknown ──
     if ctype == "functional":
+        # 容量数值语义：约束带容量单位（ml/mah/oz…）且商品标题声明了主容量时，
+        # 用数值比较 + 单位换算判定，而不是子串命中 —— 防「系列描述里提到 10000mAh
+        # 就判 ✅」的假阳性（2026-11-14 实测），也让 40oz≈1183ml ≥ 500ml 从 ❔ 翻成 ✅。
+        cap = _capacity_of(content)
+        if cap:
+            wanted_canon, wanted_unit, wanted_label, wanted_orig = cap
+            headed: list[tuple[Any, tuple[float, str, str, str]]] = []
+            for it in items:
+                head = _headline_capacity(it)
+                if head:
+                    headed.append((it, head))
+            if headed:
+                it, head = max(headed, key=lambda t: t[1][0])
+                p_canon, p_label, p_canon_unit, p_orig = head
+                ge = p_canon >= wanted_canon
+                return {**base,
+                        "rule": "spec.capacity_ge" if ge else "spec.capacity_lt",
+                        "status": STATUS_SAT if ge else STATUS_UNSAT,
+                        "evidence": (f"「{_name_of(it)}」主容量 "
+                                     f"{_capacity_verdict_text(p_label, p_canon, p_canon_unit, p_orig,
+                                                               wanted_label, wanted_orig, ge)}"),
+                        "reason": None if ge else "商品标题明确标注的容量小于需求"}
         for kw in keywords:
             variants = _synonym_variants(kw, content)
             for it in items:
@@ -536,6 +621,24 @@ def _judge_constraint(constraint: Any, items: list[Any], budget_limit: float | N
                     return {**base, "rule": RULES["functional"], "status": STATUS_SAT,
                             "evidence": f"「{_name_of(it, hit)}」命中关键词{detail}",
                             "reason": None}
+        # 哑光反证（2026-11-14 实测）：约束是「哑光」而商品明确写亮面
+        # （Shiny / Glossy / Patent leather）→ 这是**确证冲突**，不是「无法判定」。
+        # 演示实测 LOW PUCKER PUMP 描述 "Shiny oxblood leather finish" 要哑光 ——
+        # 判 ❌（商品自己说是亮面）比 ❔（可能只是没写）更诚实。
+        if any("哑光" in kw for kw in keywords):
+            for it in items:
+                low = _text_of(it)
+                bad = next(
+                    (a for a in ("shiny", "glossy", "high gloss", "high-gloss",
+                                 "patent", "polished", "lustre", "luster")
+                     if re.search(rf"(?<![a-z0-9]){re.escape(a)}(?![a-z0-9])", low)),
+                    None,
+                )
+                if bad:
+                    return {**base, "rule": "attribute.matte_contradicted",
+                            "status": STATUS_UNSAT,
+                            "evidence": f"「{_name_of(it, bad)}」商品明确为亮面（{bad}），与「哑光」冲突",
+                            "reason": "商品字段写明了亮面（shiny/glossy），确证不满足哑光"}
         return {**base, "status": STATUS_UNKNOWN, "rule": RULE_NO_EVIDENCE,
                 "evidence": None,
                 "reason": f"组合中没有任何商品命中关键词「{'、'.join(keywords)}」——"
@@ -606,7 +709,22 @@ def _item_verdicts(constraint: Any, items: list[Any]) -> list[dict]:
                          "evidence": f"命中禁忌词「{hit}」" if hit else "未出现禁忌词"})
         return rows
 
+    cap = _capacity_of(content)
     for it in items:
+        # 容量数值语义与组合级判定保持同一套：标题主容量直接决定 pass/fail，
+        # 否则会出现「组合层按主容量判 ❌、逐件表却因子串命中标 ✅」的自相矛盾界面。
+        head = _headline_capacity(it)
+        if cap and head:
+            p_canon, p_label, p_canon_unit, p_orig = head
+            if p_canon >= cap[0]:
+                rows.append({"status": "pass",
+                             "evidence": ("主容量 " + _capacity_verdict_text(
+                                 p_label, p_canon, p_canon_unit, p_orig, cap[2], cap[3], True))})
+            else:
+                rows.append({"status": "fail",
+                             "evidence": ("主容量 " + _capacity_verdict_text(
+                                 p_label, p_canon, p_canon_unit, p_orig, cap[2], cap[3], False))})
+            continue
         blob = _text_of(it)
         hit_kw = _find_hit(blob, expansion)
         if hit_kw:
