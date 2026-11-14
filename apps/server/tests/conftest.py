@@ -41,6 +41,22 @@ def _isolate_session_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_pg_dual_write(monkeypatch):
+    """Keep PG dual-write OFF during tests: pure JSONL only.
+
+    `apps/server/.env` sets DATABASE_URL, and several test modules call
+    load_dotenv() at import time, which would inject it into os.environ and
+    make audit/order dual-write push test-generated rows into the real
+    `ecv_paypal` database. pg_enabled() re-reads os.getenv on every call, so
+    deleting the var here keeps every test on the JSONL path regardless of
+    import order. pg_store unit tests that need a live backend set their own
+    monkeypatched URL inside the test body.
+    """
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_audit_store(tmp_path, monkeypatch):
     """Keep audit JSONL out of the repo `data/` dir during tests.
 

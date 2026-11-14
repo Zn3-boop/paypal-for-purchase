@@ -288,3 +288,64 @@ def test_guardrail_reports_no_budget_instead_of_pretending_pass(client):
     assert r.status_code == 200, r.text
     assert r.json()["guardrail"]["status"] == "no_budget"
 
+
+
+# ------------------------------------------------- 按件加购（POST /cart/items/{id}）
+
+def test_add_single_item_from_plan_extends_cart(client):
+    """「我只想买一件」：方案里有 3 件、车里只有 1 件 → ➕ 只把这一件加进去。"""
+    sid = _sid("cart-add-one")
+    cart = [_item("sku1", "环保桌游", 25.0)]
+    plan = [
+        _item("sku1", "环保桌游", 25.0),
+        _item("sku2", "呢绒大衣", 120.0),
+        _item("sku3", "R&B 黑胶", 30.0),
+    ]
+    _seed(sid, cart, plan_a=plan)
+
+    r = client.post("/api/v1/cart/items/sku2", params={"session_id": sid})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["success"] is True
+    assert body["item_id"] == "sku2"
+    assert body["quantity"] == 1
+    assert body["old_total"] == 25.0
+    assert body["new_total"] == 145.0
+    ids = [i["id"] for i in body["cart"]["items"]]
+    assert ids == ["sku1", "sku2"], "只允许追加这一件，不许把整份方案灌进车"
+    assert "cart_modified" in _audit(client, sid)
+
+
+def test_add_item_twice_increments_quantity_not_duplicate_row(client):
+    sid = _sid("cart-add-twice")
+    _seed(sid, [], plan_a=[_item("sku2", "呢绒大衣", 120.0)])
+
+    client.post("/api/v1/cart/items/sku2", params={"session_id": sid})
+    r = client.post("/api/v1/cart/items/sku2", params={"session_id": sid})
+    assert r.status_code == 200, r.text
+    cart = client.get("/api/v1/cart", params={"session_id": sid}).json()
+    assert len(cart["items"]) == 1, "同款应合并成一行，不是两行"
+    assert cart["items"][0]["quantity"] == 2
+    assert cart["total"] == 240.0
+
+
+def test_add_item_outside_plan_is_404(client):
+    """只认方案快照里的商品 —— 防止前端伪造任意商品/价格进车。"""
+    sid = _sid("cart-add-404")
+    _seed(sid, [], plan_a=[_item("sku2", "呢绒大衣", 120.0)])
+
+    r = client.post("/api/v1/cart/items/forged_sku", params={"session_id": sid})
+    assert r.status_code == 404
+    assert "方案快照" in r.json()["detail"]
+    assert client.get("/api/v1/cart", params={"session_id": sid}).json()["total"] == 0.0
+
+
+def test_add_item_reports_budget_fact_without_blocking(client):
+    sid = _sid("cart-add-budget")
+    _seed(sid, [], plan_a=[_item("sku2", "呢绒大衣", 120.0)], budget=100.0)
+
+    r = client.post("/api/v1/cart/items/sku2", params={"session_id": sid})
+    assert r.status_code == 200, r.text
+    assert r.json()["guardrail"]["status"] == "fail"
+    assert r.json()["guardrail"]["overage"] == 20.0
+

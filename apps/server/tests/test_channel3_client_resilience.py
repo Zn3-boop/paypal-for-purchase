@@ -33,6 +33,18 @@ from app.services.channel3.config import Channel3Config  # noqa: E402
 from app.services.group_purchase.planner import generate_dual_plans  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_channel3_circuit():
+    """熔断状态是模块级全局：打开 60s 后，任何真实检索都会短路成 error。
+
+    韧性测试恰恰需要「每次都真实走一遍失败路径」才能验证降级逻辑，
+    所以每个用例前复位熔断，避免上一个用例的失败污染下一个。
+    """
+    channel3_module._reset_circuit_breaker()
+    yield
+    channel3_module._reset_circuit_breaker()
+
+
 def _client() -> Channel3SearchClient:
     return Channel3SearchClient(
         Channel3Config(
@@ -68,6 +80,33 @@ async def test_cert_error_degrades_fast_and_reports_error():
     assert elapsed < 5.0, f"证书失败必须快速降级，实际 {elapsed:.2f}s"
     # 每个信任来源各试一次（系统库 → certifi），不重复轰炸同一来源
     assert attempts == list(range(len(client._contexts)))
+
+
+@pytest.mark.asyncio
+async def test_hard_timeout_caps_hung_sdk_and_degrades(monkeypatch):
+    """SDK 挂住时不能把 GET /plans 拖死：硬超时一到就返回 error，交给本地目录降级。
+
+    现场真实故障：Channel3 网络抖动时，SDK 内部 10s 超时 × 重试 × 2 信任源，
+    把方案生成拖到 90s+，UI 永远停在「⏳ 等待生成方案」。
+    """
+    client = _client()
+    client._sdks = [None] * len(client._contexts)
+    # 把硬超时压到 0.05s，让测试跑得快；SDK 侧模拟无限挂起
+    monkeypatch.setattr(channel3_module, "_CHANNEL3_HARD_TIMEOUT", 0.05)
+
+    def _hang(self, query, limit, index):  # noqa: ARG001
+        time.sleep(1.0)
+        return []
+
+    with patch.object(Channel3SearchClient, "_search_sync", _hang):
+        started = time.monotonic()
+        result = await client.search_products_with_status("jazz vinyl", 5)
+        elapsed = time.monotonic() - started
+
+    assert result.status == CHANNEL3_ERROR, result
+    assert not result.ok
+    assert "超时" in result.message, result.message
+    assert elapsed < 0.9, f"硬超时必须生效，实际 {elapsed:.2f}s"
 
 
 @pytest.mark.asyncio
@@ -108,6 +147,31 @@ async def test_ok_result_cached_and_key_normalized():
     assert again.items and again.status == CHANNEL3_OK
     assert calls["n"] == 1, "归一化后的同一 query 应命中缓存"
     channel3_module._CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_skips_network_after_error():
+    """熔断：一次失败后 60s 内不再发真实请求，直接降级（status 仍如实报 error）。
+
+    这防止「每次点重新生成都白等 3–20s」——失败过一次就把兜底从"慢"变成"立刻"，
+    但绝不把 error 伪装成 ok（status/message 都是诚实的）。
+    """
+    client = _client()
+    client._sdks = [None] * len(client._contexts)
+    calls = {"n": 0}
+
+    def _boom(self, query, limit, index):  # noqa: ARG001
+        calls["n"] += 1
+        raise ConnectionError("network unreachable (simulated)")
+
+    with patch.object(Channel3SearchClient, "_search_sync", _boom):
+        first = await client.search_products_with_status("ping", 3)
+        second = await client.search_products_with_status("ping", 3)
+
+    assert first.status == CHANNEL3_ERROR
+    assert second.status == CHANNEL3_ERROR
+    assert "熔断" in second.message, second.message
+    assert calls["n"] == 1, "第二次调用应被熔断短路，不再触发真实网络请求"
 
 
 def test_dns_pin_pins_api_host_and_ignores_non_pin_hosts():

@@ -1,4 +1,4 @@
-﻿# Agentic Payment - Authorization-Boundary Demo (PayPal Hackathon)
+﻿# Agentic Payment - Authorization-Boundary Demo 
 
 > **The agent can spend your money - but only inside the authorization boundary you control.**
 
@@ -250,11 +250,40 @@ UI 因此从不暗示「这张更值得买」。回归：`tests/test_mmr.py`、`
 （`reconcile_sessions_on_startup`）优先采信审计里的 `payment_completed`，不会被惰性过期抢先标记。
 回归：`tests/test_order_expiry.py`。
 
+### 会话生命周期：同样用「惰性过期」，但只对工作台生效
+
+订单是**事实**（append-only），会话是**工作台**（约束/方案/购物车/订单指针）——两者过期策略必须不同：
+
+- 订单 `paid` 是终态，**永久保存**，任何过期判定都不碰它（`expire_if_stale` 只在 `paying` 时生效）；
+- 会话空闲超过 TTL（默认 2 小时，`SESSION_TTL_SECONDS` 可覆盖；`<=0` 关闭）即视为不存在：
+  `get_session` / `get_or_create_session` / `load_sessions_from_disk` 三条读路径统一判定，
+  过期会话**直接删除磁盘文件**，前端 `ensureSession` 看到 `exists=false` 自动用同一 `session_id`
+  重建空会话 —— 不需要用户点按钮、不需要换 `user_id`、不需要前端感知 TTL。
+
+为什么「跨天回来看到上次的约束/方案/购物车」是这个方案的修复对象：localStorage 里的
+`session_id` 永久复用（`payment.session.v1`），换 `user_id` 或校验属主都治不了它——因为
+`user_id` 没变，被复用是**时间**问题。给状态加生命周期（`last_active_at` 滑动窗口 +
+读路径惰性判定）才是一劳永逸。
+
+**滑动续期（express-session 的 touch 语义）**：每次读/写刷新 `last_active_at`；只在
+**距上次落盘超过半个 TTL** 时才写盘，避免前端 3~5 秒轮询把会话 JSON 反复全量重写。
+读路径不写盘 → 进程重启后活跃会话会被误判过期，所以「半 TTL 落盘」是必须的一步。
+老会话文件没有 `last_active_at` 时按 `updated_at` 兜底——升级后第一次读到即按真实空闲时长清理残留。
+
+**代价（一行）**：没人访问的过期会话不会立刻消失，它下次被读到才删除。
+demo 规模下目录不会无限增长（启动回放时顺手清一批），无需定时任务。
+
+`/session/{id}/status` 回显 `last_active_at` / `ttl_seconds` / `expires_in_seconds`，
+前端倒计时不必自己猜。回归：`tests/test_session_lifecycle.py`（含「已支付订单不随会话过期」契约）。
+
 ## What is deliberately demo-grade (honest limitations)
 
 - **No user login.** Sessions are keyed by `session_id` only, and are persisted as one JSON per
   session under `data/sessions/` (`SESSION_STORE_DIR` overrides it): constraints, plans, cart and
-  order id survive a restart. Orders and audit events are append-only JSONL; search memory is
+  order id survive a restart. Sessions have a **sliding TTL** (default 2h, `SESSION_TTL_SECONDS`
+  overrides; `<=0` disables) checked lazily on read — an idle session is treated as missing and
+  recreated fresh, but **paid orders live in the append-only order log and are never expired**.
+  Orders and audit events are append-only JSONL; search memory is
   JSONL too. The **only** in-memory piece is the pending PayPal approval-URL map — the callback
   falls back to the `session_id` in the return URL when that map is lost.
 - **Retrieval memory is team-wide**, not per-user (single-tenant demo).
@@ -294,6 +323,46 @@ This prototype supports two interchangeable data sources for demo:
 Channel3 results are filtered for relevance to the request, same-name + same-price duplicates are
 dropped, and items that came back but did not match are shown *separately* as "closest results"
 (`sponsor_related`) - they never enter a plan as if they were matches.
+
+## Storage: JSONL + PostgreSQL dual-write
+
+订单与审计的历史默认落在 `apps/server/data/` 下的 JSONL（追加写、人可读、重启恢复的底稿）。
+原生 **PostgreSQL 18**（本机 `D:\postgresql`，库 `ecv_paypal`）作为同一数据的**结构化查询副本**：
+
+- **双写**：`DATABASE_URL` 设置时，每次订单状态变化 / 审计事件既追加 JSONL，也写 PG；
+  PG 失败只 `logger.warning`，绝不影响 JSONL 主链路（best-effort，无事务耦合）。
+- **语义**：订单按 `order_id` **upsert**（last-wins，与 JSONL 追加写行序=时间序一致）；
+  审计**追加写**，迁移专用 `insert_audit_if_absent` 按 timestamp+session+event+user+actor+data+快照查重（幂等）。
+- **开关**：`DATABASE_URL` 留空 → 纯 JSONL 模式（CI/离线测试），行为与改造前完全一致。
+- **测试隔离**：`tests/conftest.py` 的 `_isolate_pg_dual_write` 在每个测试前删除
+  `DATABASE_URL`，全量测试绝不写真实 PG；`tests/test_pg_store.py` 用 mock 连接覆盖
+  schema 幂等 / last-wins upsert / 审计三态 / 降级回退（不依赖本地 PG）。
+
+表结构由 `pg_store.ensure_schema()` 幂等建表（`CREATE TABLE IF NOT EXISTS`）：
+`orders`（每 order_id 一行，items/transitions 为 JSONB）+ `audit_events`（id 自增，含
+constraint_snapshot/plan_snapshot JSONB）。
+
+### 迁移历史 JSONL → PG（一次性回填）
+
+```bash
+python scripts/migrate_jsonl_to_pg.py --dry-run        # 只盘点（唯一订单数 / 审计行数 / 坏行），不写
+python scripts/migrate_jsonl_to_pg.py                  # 备份 → 迁移（订单 upsert + 审计查重插入）→ 对账
+python scripts/migrate_jsonl_to_pg.py --skip-backup    # 已备份过 / 幂等重跑
+```
+
+- 迁移前自动把 JSONL 复制到 `backups/jsonl_<时间戳>/`（`--skip-backup` 跳过），原文件保留。
+- 对账以「插入 + 已存在跳过 == JSONL 行数」为准（幂等重跑不误报），并校验 PG 中每个
+  order_id 的 status 与 JSONL 最新行一致。
+- 坏行跳过并计数；合计不符时退出码 1，可回滚重来。
+
+### 备份 / 恢复
+
+```bash
+pg_dump -U postgres -h localhost ecv_paypal > ecv_paypal_$(date +%Y%m%d).sql   # 逻辑备份
+pg_restore / psql -U postgres -h localhost ecv_paypal < ecv_paypal_$(date +%Y%m%d).sql
+```
+
+PG 数据源自 `D:\postgresql`（原生 PG 18 实例；`D:\ecv-paypal\data\pgdata` 是无关的遗留目录）。
 
 ## Quick start
 
@@ -349,6 +418,7 @@ demonstrates real restart-proof persistence rather than a page reload. Before fi
 | `PAYPAL_SANDBOX_API` | `https://api-m.sandbox.paypal.com` | sandbox API base |
 | `CHANNEL3_API_KEY` | - | Channel3 real product search; empty → honest fallback to local `catalog_k1` |
 | `CHANNEL3_DNS_PIN` | (empty) | 演示机 DNS 被污染时的应急：逗号分隔的真实 IP 列表，应用层固定 connect 目标（TLS/SNI/Host 仍按域名校验，不关校验、无需管理员权限）；正常网络留空 |
+| `DATABASE_URL` | (empty) | PostgreSQL 连接串（如 `postgresql://postgres:xxx@localhost:5432/ecv_paypal`）。设置后订单/审计**双写** JSONL + PG；留空 → 纯 JSONL 模式（CI/离线测试默认） |
 
 ## Real Mode (for judges)
 
@@ -410,7 +480,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 179 tests
+python -m pytest -q        # 396 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
@@ -421,7 +491,46 @@ Pareto verdicts, Channel3 retrieval memory, MMR re-ranking + per-card reason cod
 (`tests/test_mmr.py`, `tests/test_reason_codes.py`, `tests/test_plan_upgrades.py`),
 payment-window lazy expiry + external-fact override (`tests/test_order_expiry.py`), and restart
 persistence (`tests/test_restart_persistence.py`: orders + audit timeline are rebuilt from JSONL
-after a cold start).
+after a cold start). PG dual-write backend (`tests/test_pg_store.py`): schema idempotency,
+order last-wins upsert, audit append + `insert_audit_if_absent` three-state dedup, and
+no-DATABASE_URL fallback — all mocked, no live database needed.
+Same-SKU × N batch ordering (`tests/test_unified_batch_qty.py`): "32 双统一队鞋" → one main SKU ×
+32 (A = cheapest affordable, B = justified same-family upgrade else identical), "12 把键盘" stays
+distinct SKUs, headcount soft quantities ("5 人份…") don't trigger, and a budget that can't fit N
+units falls back honestly instead of silently shrinking the order. Group-context weak signal
+("团体/团购/一批…" + N>1 + no variety words) defaults to same-SKU ×N too ("采购 40 只马克杯" no
+longer splits into 5 distinct mugs), with a same-family multi-SKU fallback when one SKU can't fit
+the budget — flagged as `unified_xN_fallback` and still honest about shortfalls. Search-query
+hygiene: in cup contexts ("马克杯/陶瓷杯…") "水杯" maps to cup instead of water bottle, so mug
+retrieval isn't polluted by bottle results. Quantity lexicon covers "盏" ("一盏台灯" → 1, no more
+8-lamp $1726 plans), and spec numbers with units (20W / 10000mAh / 500ml) plus "快充→fast
+charging" are injected into the Channel3 query so power-bank retrieval isn't starved to 2 hits.
+Retrieval-metric consistency (`tests/test_retrieval_meta_consistency.py`): the three numbers a
+reviewer can mentally recompute — candidate (raw recall count) / matched (post-constraint pool) /
+filtered (= candidate − matched, enforced server-side) — come from one source and always sum
+correctly, so the UI never shows the old contradiction (\"候选 19 · 命中 19 · 过滤 1\"); the
+retrieval note no longer hardcodes a filtered count either (numbers live in structured fields).
+
+## Quality gate (extraction → retrieval → satisfaction)
+
+`scripts/quality_gate.py` runs the 20 template purchase sentences through the **real**
+pipeline — rule extraction, Channel3 search, per-constraint satisfaction verdicts — and
+sums the three status buckets. It doubles as a CI assertion gate:
+
+```bash
+python scripts/quality_gate.py --json scripts/quality_baseline.json   # human + machine baseline
+python scripts/quality_gate.py --max-unknown 15 --min-sat 85          # fail (exit 1) if regression
+```
+
+Baseline (2026-11-13): **sat=91, unsat=0, unknown=12** across 103 constraint judgments.
+`unsat=0` is meaningful because the gate *mirrors the real planner's budget prefilter*
+(`prefilter_by_constraints` drops items priced above a hard budget before judging), so
+"7 items over budget" shows up as fewer in-budget candidates, not as a false verdict that
+the requirement is un-satisfiable. The remaining `unknown`s are honest `❔` — data-source
+gaps (item descriptions missing a color/size field), subjective words ("音质"), or
+over-tight budgets that leave too few candidates ("雨伞 ≤ $45" keeps 5/20). The pure
+helper functions (`_prefilter_by_budget`, `_stats`) are unit-tested in
+`tests/test_quality_gate_helpers.py` and run offline in CI.
 
 ## License
 

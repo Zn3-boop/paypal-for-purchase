@@ -1,0 +1,809 @@
+{
+  "generated_at": "2026-11-13T18:30:52",
+  "prefilter": true,
+  "stats": {
+    "sat": 91,
+    "unsat": 0,
+    "unknown": 12
+  },
+  "scenarios": [
+    {
+      "name": "服1 半身裙",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "skirt drape commuter everyday carry",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "半身裙",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "垂感",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "黑色",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "中长",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "服2 针织开衫",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "cardigan knit soft",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "针织",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "开衫",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "软糯",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "亲肤",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "白色",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "短款",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "服3 牛仔裤",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "jeans high rise washed blue straight leg colorfast fade-resistant",
+      "verdicts": [
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "牛仔材质",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "高腰版型",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "水洗蓝",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "直筒",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "不容易掉色",
+          "status": "unknown"
+        }
+      ]
+    },
+    {
+      "name": "服4 皮鞋",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "shoes leather shoes matte low heel",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "鞋",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "哑光",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "深棕",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "低跟",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "数1 充电宝",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "power bank portable compact",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "充电宝",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "便携",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "白色",
+          "status": "unknown"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "小容量",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "数2 键盘",
+      "status": "ok",
+      "raw_n": 19,
+      "n": 19,
+      "search_query": "keyboard silent light gray light grey",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "键盘",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "静音",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "浅灰",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "68键",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "数3 鼠标",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "wireless matte ergonomic",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "鼠标",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "人体工学",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "磨砂黑",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "无线",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "数4 数据线",
+      "status": "ok",
+      "raw_n": 19,
+      "n": 19,
+      "search_query": "usb cable charging cable braided navy 1m",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "数据线",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "编织",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "藏青",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "一米长",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "生1 马克杯",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "mug ceramic cream off-white wide mouth",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "马克杯",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "陶瓷材质",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "白色",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "宽口",
+          "status": "unknown"
+        }
+      ]
+    },
+    {
+      "name": "生2 雨伞",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "umbrella dark green windproof foldable",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "雨伞",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "抗风",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "墨绿",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "折叠",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "生3 帆布包",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "book canvas canvas bag",
+      "verdicts": [
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "帆布材质",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "帆布包",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "厚实布料",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "卡其色",
+          "status": "unknown"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "大号",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "书",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "生4 围巾",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "scarf wool caramel wide warm thermal",
+      "verdicts": [
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "围巾",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "羊毛材质",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "焦糖色",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "宽版",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "保暖",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团1 通勤外套",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 12,
+      "search_query": "jacket navy structured wrinkle resistant commuter everyday carry",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤320.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "外套",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "挺括",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "抗皱",
+          "status": "unknown"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "藏青",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "中长款",
+          "status": "unknown"
+        }
+      ]
+    },
+    {
+      "name": "团2 蓝牙耳机",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 17,
+      "search_query": "headphones bluetooth wireless headphones earphones matte",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤160.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "无线",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "蓝牙",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "耳机",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "音质",
+          "status": "unknown"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "哑光黑",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "小巧",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团3 双肩背包",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 19,
+      "search_query": "backpack gray grey waterproof durable",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤180.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "背包",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "防水",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "耐磨",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "灰色",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "大号",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团4 保温杯",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 20,
+      "search_query": "stainless steel insulated cup insulated thermal 500ml 316",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤90.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "保温杯",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "316不锈钢",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "不锈钢材质",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "白色",
+          "status": "unknown"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "500ml",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团5 雨伞",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 5,
+      "search_query": "umbrella dark green windproof reinforced foldable",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤45.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "雨伞",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "抗风",
+          "status": "unknown"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "加固",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "墨绿",
+          "status": "unknown"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "折叠",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团6 针织围巾",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 10,
+      "search_query": "scarf wool wide knit",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤110.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "针织",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "围巾",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "羊毛材质",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "红色",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "宽版",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团7 静音键盘",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 16,
+      "search_query": "keyboard silent key switch smooth light gray light grey gray grey",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤130.0",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "静音",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "键盘",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "按键顺滑",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "浅灰",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "68键",
+          "status": "sat"
+        }
+      ]
+    },
+    {
+      "name": "团8 帆布托特包",
+      "status": "ok",
+      "raw_n": 20,
+      "n": 3,
+      "search_query": "canvas heavy duty extra large tote bag",
+      "verdicts": [
+        {
+          "type": "budget",
+          "scope": "per_item",
+          "content": "单件预算≤35.0",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "帆布材质",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "托特包",
+          "status": "sat"
+        },
+        {
+          "type": "functional",
+          "scope": "combo",
+          "content": "加厚",
+          "status": "sat"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "卡其色",
+          "status": "unknown"
+        },
+        {
+          "type": "preference",
+          "scope": "combo",
+          "content": "加大款",
+          "status": "unknown"
+        }
+      ]
+    }
+  ]
+}
