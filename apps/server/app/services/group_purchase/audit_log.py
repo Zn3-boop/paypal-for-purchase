@@ -10,12 +10,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+from app.paths import data_dir
+
+# PG 结构化副本为旁路写入：psycopg 缺失 / DATABASE_URL 未配置时，
+# 哨兵置 None，审计日志退化为纯 JSONL —— PG 绝不能反过来卡审计主链路。
+try:
+    from app.services.group_purchase.pg_store import insert_audit
+except Exception:  # pragma: no cover
+    insert_audit = None
+
+logger = logging.getLogger(__name__)
 
 AuditEventType = Literal[
     "constraint_changed",       
@@ -75,10 +87,7 @@ class AuditLogger:
     """会话级审计日志管理器。"""
     
     def __init__(self, store_dir: str = ""):
-        self.store_dir = store_dir or os.getenv(
-            "AUDIT_LOG_STORE_DIR",
-            "./data/audit_logs",
-        )
+        self.store_dir = store_dir or str(data_dir("AUDIT_LOG_STORE_DIR", "audit_logs"))
         os.makedirs(self.store_dir, exist_ok=True)
         self._lock = threading.Lock()
         self._log_cache: dict[str, list[AuditLogEntry]] = {}
@@ -119,6 +128,12 @@ class AuditLogger:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(entry.to_json_line() + "\n")
         
+        # 双写：PG 结构化副本（旁路写入，失败静默降级，JSONL 仍是主链路）
+        if insert_audit is not None:
+            try:
+                insert_audit(entry.to_dict())
+            except Exception as exc:  # pragma: no cover - 审计旁路绝不阻塞主链路
+                logger.warning("PG audit write failed, JSONL remains: %s", exc)
         return entry
     
     def _store_user_dirs(self, user_id: str | None) -> list[str]:

@@ -36,11 +36,19 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+from app.paths import data_dir
 from app.services.group_purchase.audit_log import (
     get_audit_logger,
     log_order_status_changed,  # 第 9 个审计埋点
 )
 from app.services.group_purchase.session_state import get_session, update_session
+
+# PG 结构化副本为旁路写入：psycopg 缺失 / DATABASE_URL 未配置 / 连不上时，
+# 哨兵置 None，订单退化为纯 JSONL —— PG 绝不能反过来卡支付/订单主链路。
+try:
+    from app.services.group_purchase.pg_store import upsert_order
+except Exception:  # pragma: no cover
+    upsert_order = None
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +157,7 @@ _disk_lock = threading.Lock()
 
 
 def get_orders_store_dir() -> Path:
-    return Path(os.getenv("ORDER_STORE_DIR", "./data/orders"))
+    return data_dir("ORDER_STORE_DIR", "orders")
 
 
 def get_orders_file_path() -> Path:
@@ -165,6 +173,14 @@ def _append_to_disk(order: OrderRecord) -> None:
                 f.write(json.dumps(order.to_dict(), ensure_ascii=False) + "\n")
     except Exception as exc:  # pragma: no cover - 落盘失败不应阻断支付主链路
         logger.warning("order persist failed for %s: %s", order.order_id, exc)
+
+    # 双写：PG 结构化副本（旁路写入，失败静默降级，JSONL 仍是主链路）。
+    # 订单语义是 upsert（同一 order_id 以最后一行为准），与审计 append-only 分开。
+    if upsert_order is not None:
+        try:
+            upsert_order(order.to_dict())
+        except Exception as exc:  # pragma: no cover - PG 绝不动摇订单主链路
+            logger.warning("PG order upsert failed for %s: %s", order.order_id, exc)
 
 
 def order_from_dict(data: dict[str, Any]) -> OrderRecord:
