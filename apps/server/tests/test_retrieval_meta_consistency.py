@@ -75,7 +75,7 @@ def channel3_stub(monkeypatch):
          "price": 60.0, "currency": "USD", "tags": ["外套", "旗舰"], "source": "channel3", "image_url": ""},
     ]
 
-    async def _fake_search_status(query: str, limit: int = 20):  # noqa: ARG001
+    async def _fake_search_status(query: str, limit: int = 20, force_probe: bool = False):  # noqa: ARG001
         return _result([dict(it) for it in items])
 
     monkeypatch.setattr(

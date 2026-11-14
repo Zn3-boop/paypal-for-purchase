@@ -301,7 +301,7 @@ def _overlap_score(item: dict[str, Any], anchors: set[str]) -> int:
 
 
 async def _retrieve_catalog(
-    query: str, use_channel3: bool
+    query: str, use_channel3: bool, force_probe: bool = False
 ) -> tuple[list[dict[str, Any]], str, str, str, list[dict[str, Any]], str, int]:
     """检索商品目录（Channel3 优先，失败降级本地 K1）。
 
@@ -346,7 +346,9 @@ async def _retrieve_catalog(
 
         channel3_status = "empty"
         for attempt in attempts:
-            outcome = await search_products_with_status(attempt, limit=20)
+            outcome = await search_products_with_status(
+                attempt, limit=20, force_probe=force_probe
+            )
             channel3_status = outcome.status
             if outcome.status in ("error", "disabled"):
                 logger.warning(
@@ -415,6 +417,7 @@ async def generate_dual_plans(
     min_items: int = 3,
     max_items: int = 8,
     use_channel3: bool = True,
+    force_probe: bool = False,
 ) -> dict[str, Any]:
     """生成双方案（低价优先 A / 耐用优先 B）。
 
@@ -422,6 +425,10 @@ async def generate_dual_plans(
     当候选来自 Channel3 时，B 的每个 slot 都在 A 的基础上做「同品类升级」：
     要么换成关键词匹配分更高的同款，要么保持原物 —— 因此「共有商品」天然 > 0，
     差异对比展示的是逐件升级，而不是两篮完全不同的商品。
+
+    force_probe（半开探针）：用户显式点「🔄 重新生成方案」时由 API 层传入 True，
+    透传给 Channel3 检索 —— 熔断期内也放行一次真实探测。成功即关熔断 + 入缓存，
+    失败维持短路。不加它时行为与以前完全一致（熔断照常短路自动重试）。
     """
     # Bug 1（评审坑 3）：组合总价 cap 只取 scope="total" 的预算。
     # per_item（「单件预算不超 130」）约束的是每一件单价，不约束组合总价。
@@ -437,7 +444,7 @@ async def generate_dual_plans(
         nearest,
         channel3_status,
         recalled_count,
-    ) = await _retrieve_catalog(intent_query, use_channel3)
+    ) = await _retrieve_catalog(intent_query, use_channel3, force_probe=force_probe)
     filtered = prefilter_by_constraints(
         catalog,
         constraints,

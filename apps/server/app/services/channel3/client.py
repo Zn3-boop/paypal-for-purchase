@@ -241,7 +241,9 @@ class Channel3SearchClient:
         # 选品只需要按相关度排好的前 N 个，翻页毫无价值。
         return list(pager.items or [])[:limit]
 
-    async def search_products_with_status(self, query: str, limit: int = 8) -> Channel3Result:
+    async def search_products_with_status(
+        self, query: str, limit: int = 8, force_probe: bool = False
+    ) -> Channel3Result:
         """检索并给出三态状态；SSL 校验失败时按信任链回退（仍保持校验）。
 
         硬超时兜底：SDK 内部的 10s 超时 × max_retries × 2 信任源，在网络抖动时
@@ -251,6 +253,11 @@ class Channel3SearchClient:
 
         熔断：60s 内刚失败过一次 → 直接返回 error（不发真实请求）。status 仍如实
         上报 error，只是把「每次都白等 3–20s」换成「立即诚实降级」。
+
+        半开探针（force_probe=True）：用户显式点「🔄 重新生成方案」视为人工介入，
+        允许在熔断期内放行**一次**真实探测 —— 这是无人介入的自动重试（5s 轮询 /
+        首次提交意图）永远不该有的特权。探测成功立刻关闭熔断（并把结果交给上层
+        写缓存，之后 30min 内该词秒回）；失败维持短路，60s 窗口不重置。
         """
         if not self.enabled:
             logger.info("Channel3 未配置 key，跳过 L1 检索")
@@ -259,7 +266,7 @@ class Channel3SearchClient:
         if not query:
             return Channel3Result([], CHANNEL3_EMPTY, "检索词为空")
 
-        if _circuit_open():
+        if _circuit_open() and not force_probe:
             logger.warning(
                 "Channel3 熔断中（%.0fs 内刚失败过），跳过真实检索，直接降级本地目录",
                 _CIRCUIT_OPEN_SECONDS,
@@ -268,9 +275,11 @@ class Channel3SearchClient:
                 [], CHANNEL3_ERROR,
                 f"Channel3 60s 熔断期内（上轮检索失败），已直接降级本地目录；稍后可重试",
             )
+        if _circuit_open() and force_probe:
+            logger.info("Channel3 半开探针：用户显式重试，放行一次真实检索")
 
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._search_with_trust_chain(query, limit),
                 timeout=_CHANNEL3_HARD_TIMEOUT,
             )
@@ -281,6 +290,13 @@ class Channel3SearchClient:
                 _CHANNEL3_HARD_TIMEOUT,
             )
             return Channel3Result([], CHANNEL3_ERROR, "Channel3 检索超时（网络抖动），已降级本地目录")
+
+        # 半开语义的「成功即关」：只要有真实请求存活（ok/empty），熔断就是干净的。
+        # 失败路径已在 _search_with_trust_chain 里 _note_channel3_failure()，幂等且
+        # 不重置 60s 窗口 → 维持短路。这里只在成功时复位，正是探针想达成的事。
+        if result.status != CHANNEL3_ERROR:
+            _reset_circuit_breaker()
+        return result
 
     async def _search_with_trust_chain(self, query: str, limit: int) -> Channel3Result:
         """信任链循环：SSL 校验失败换信任源；非证书错误直接返回 error。"""
@@ -366,11 +382,17 @@ def get_channel3_client() -> Channel3SearchClient:
     return _channel3_client
 
 
-async def search_products_with_status(query: str, limit: int = 8) -> Channel3Result:
+async def search_products_with_status(
+    query: str, limit: int = 8, force_probe: bool = False
+) -> Channel3Result:
     """便捷入口：带 5 分钟 TTL 缓存 + 三态的检索。
 
     缓存只存 ok/empty（成功过的事实），**不缓存 error** ——
     否则一次网络抖动会被钉住 5 分钟，演示前"重试也救不回来"。
+
+    force_probe（半开探针）：透传给底层 client —— 用户显式「重新生成方案」时
+    绕过熔断发一次真实探测。缓存命中优先级不变：缓存里是之前真取到的数据，
+    即使是探针也直接秒回，不需要再打一次网络。
     """
     key = _cache_key(query, limit)
     now = time()
@@ -380,7 +402,9 @@ async def search_products_with_status(query: str, limit: int = 8) -> Channel3Res
         logger.info("Channel3 缓存命中：%s", query)
         return Channel3Result(list(entry["items"]), entry["status"], entry["message"])
 
-    result = await get_channel3_client().search_products_with_status(query, limit)
+    result = await get_channel3_client().search_products_with_status(
+        query, limit, force_probe=force_probe
+    )
     if result.status != CHANNEL3_ERROR:
         _CACHE[key] = {
             "items": list(result.items),

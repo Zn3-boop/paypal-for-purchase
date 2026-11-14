@@ -32,6 +32,10 @@ from app.services.channel3 import client as channel3_module  # noqa: E402
 from app.services.channel3.config import Channel3Config  # noqa: E402
 from app.services.group_purchase.planner import generate_dual_plans  # noqa: E402
 
+# 半开探针（2026-11-14）：用户显式「重新生成方案」= 人工介入，熔断期内放行一次
+# 真实探测。成功 → 关熔断 + 入缓存；失败 → 维持短路（60s 窗口不重置）。
+_PROBE_QUERY_KEY = channel3_module._cache_key("half open probe word", 20)
+
 
 @pytest.fixture(autouse=True)
 def _reset_channel3_circuit():
@@ -115,7 +119,7 @@ async def test_error_is_not_cached_so_retry_recovers():
     channel3_module._CACHE.clear()
     calls = {"n": 0}
 
-    async def _fake(self, query, limit=8):  # noqa: ARG001
+    async def _fake(self, query, limit=8, force_probe=False):  # noqa: ARG001
         calls["n"] += 1
         if calls["n"] == 1:
             return Channel3Result([], CHANNEL3_ERROR, "boom")
@@ -136,7 +140,7 @@ async def test_ok_result_cached_and_key_normalized():
     channel3_module._CACHE.clear()
     calls = {"n": 0}
 
-    async def _fake(self, query, limit=8):  # noqa: ARG001
+    async def _fake(self, query, limit=8, force_probe=False):  # noqa: ARG001
         calls["n"] += 1
         return Channel3Result([{"id": "ch3_1", "name": "Jazz Vinyl Box"}], CHANNEL3_OK, "")
 
@@ -255,3 +259,157 @@ async def test_cached_query_bypasses_open_circuit_but_fresh_query_short_circuits
     assert fresh.status == CHANNEL3_ERROR and "熔断" in fresh.message, (
         "未缓存新词应被熔断短路 → 这正是团购新词 error、单人演示词 ok 的根因"
     )
+
+
+@pytest.mark.asyncio
+async def test_force_probe_bypasses_open_circuit_and_closes_on_success():
+    """半开探针：熔断期内用户显式重试（force_probe=True）放行一次真实探测，
+    成功 → 状态 ok + 熔断关闭 + 结果入缓存（此后 30min 该词秒回）。"""
+    channel3_module._CACHE.clear()
+    channel3_module._last_failure_at = time.monotonic()  # 模拟熔断打开
+    probe_item = {"id": "ch3_p1", "name": "Half Open Probe Mug", "price": 9.9}
+    try:
+        with patch.object(
+            Channel3SearchClient,
+            "_search_with_trust_chain",
+            new=AsyncMock(return_value=Channel3Result([probe_item], CHANNEL3_OK, "")),
+        ):
+            result = await channel3_module.search_products_with_status(
+                "half open probe word", 20, force_probe=True
+            )
+        circuit_after = channel3_module._last_failure_at
+        cached_after = _PROBE_QUERY_KEY in channel3_module._CACHE
+    finally:
+        channel3_module._last_failure_at = None
+        channel3_module._CACHE.clear()
+
+    assert result.status == CHANNEL3_OK and result.items, result
+    assert circuit_after is None, (
+        "探针成功必须关闭熔断（半开的「成功即关」），否则之后 60s 内其它新词仍被短路"
+    )
+    assert cached_after, (
+        "探针成功（ok）应写入 30min 缓存，让同词后续请求秒回"
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_probe_keeps_circuit_open_on_failure():
+    """半开探针失败：状态 error + 维持短路（60s 窗口不重置）+ 不写缓存。"""
+    channel3_module._CACHE.clear()
+    channel3_module._last_failure_at = time.monotonic()  # 模拟熔断打开
+    try:
+        with patch.object(
+            Channel3SearchClient,
+            "_search_with_trust_chain",
+            new=AsyncMock(
+                return_value=Channel3Result([], CHANNEL3_ERROR, "still down")
+            ),
+        ):
+            result = await channel3_module.search_products_with_status(
+                "half open probe word", 20, force_probe=True
+            )
+        cached_after = _PROBE_QUERY_KEY in channel3_module._CACHE
+        circuit_still_open = channel3_module._last_failure_at is not None
+    finally:
+        channel3_module._last_failure_at = None
+        channel3_module._CACHE.clear()
+
+    assert result.status == CHANNEL3_ERROR, result
+    assert circuit_still_open, "探针失败必须维持短路（60s 窗口不重置）"
+    assert not cached_after, (
+        "error 结果绝不写缓存（一次网络抖动不能被钉 30 分钟）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_probe_flag_flows_from_regenerate_to_planner():
+    """API 层透传：POST /plans/regenerate 置 force_probe_pending → 下一次真实生成
+    （快照为空的 GET /plans）以 force_probe=True 调 generate_dual_plans，且标记
+    一次性消费（之后轮询恢复走「熔断短路自动重试」）。"""
+    from unittest.mock import patch as _patch
+
+    from app.api import plans as plans_api
+    from app.api.plans import list_plans, regenerate_plans
+    from app.services.group_purchase.session_state import (
+        delete_session,
+        get_or_create_session,
+        get_session,
+        update_session,
+    )
+
+    sid = "half-open-probe-api-test"
+    delete_session(sid)
+    session = get_or_create_session(sid, "demo-user")
+    session.intent_query = "测试采购马克杯"
+    update_session(session)
+
+    try:
+        await regenerate_plans(session_id=sid)
+        assert get_session(sid).force_probe_pending is True, (
+            "显式「重新生成方案」必须置探针标记"
+        )
+
+        infeasible = {
+            "feasible": False,
+            "plan_a": None,
+            "plan_b": None,
+            "source": "k1_catalog",
+            "fallback": {"message": "no feasible plan"},
+            "comparison": {},
+            "retrieval": {},
+        }
+        mock_gen = AsyncMock(return_value=infeasible)
+        with _patch.object(plans_api, "generate_dual_plans", mock_gen):
+            await list_plans(session_id=sid)
+
+        called = mock_gen.await_args
+        assert called is not None and called.kwargs.get("force_probe") is True, (
+            "regenerate 后的真实生成必须以 force_probe=True 调 planner"
+        )
+        assert get_session(sid).force_probe_pending is False, (
+            "探针标记是一次性的：消费后必须回 False，避免 5s 轮询反复轰炸网络"
+        )
+    finally:
+        delete_session(sid)
+
+
+@pytest.mark.asyncio
+async def test_force_probe_flag_stays_false_for_plain_first_generation():
+    """对照：首次提交意图（非 regenerate）的真实生成不传 force_probe ——
+    自动重试没有人工介入，熔断照常短路。"""
+    from unittest.mock import patch as _patch
+
+    from app.api import plans as plans_api
+    from app.api.plans import list_plans
+    from app.services.group_purchase.session_state import (
+        delete_session,
+        get_or_create_session,
+        update_session,
+    )
+
+    sid = "half-open-probe-first-gen-test"
+    delete_session(sid)
+    session = get_or_create_session(sid, "demo-user")
+    session.intent_query = "测试采购饮用水"
+    update_session(session)
+
+    try:
+        infeasible = {
+            "feasible": False,
+            "plan_a": None,
+            "plan_b": None,
+            "source": "k1_catalog",
+            "fallback": {"message": "no feasible plan"},
+            "comparison": {},
+            "retrieval": {},
+        }
+        mock_gen = AsyncMock(return_value=infeasible)
+        with _patch.object(plans_api, "generate_dual_plans", mock_gen):
+            await list_plans(session_id=sid)
+
+        called = mock_gen.await_args
+        assert called is not None and called.kwargs.get("force_probe") is False, (
+            "首次提交（无 regenerate）不享受探针特权：force_probe 必须为 False"
+        )
+    finally:
+        delete_session(sid)

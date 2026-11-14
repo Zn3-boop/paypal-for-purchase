@@ -270,6 +270,11 @@ class GroupPurchaseSession:
     # 统一入口的模式标记：single（单人购买）/ group（团购拼单）。
     # 两种模式共用同一条「约束 → 检索 → 双方案 → 支付」流水线，只有预算/分摊展示不同。
     intent_mode: str = "group"
+    # 半开探针标记（2026-11-14）：POST /plans/regenerate（用户显式点「重新生成方案」）
+    # 置 True，下一次真实生成（快照为空的 GET /plans）消费它并把 force_probe=True
+    # 透传给 Channel3 检索 —— 熔断期内也放行一次真实探测。只给一次：消费后即 False，
+    # 之后 5s 轮询继续走「熔断短路自动重试」路径，不会被这个标记反复轰炸网络。
+    force_probe_pending: bool = False
     # 由「统一搜索框」提交时自动抽取的约束 id：
     #   - 每次新提问会整体替换这一批（旧任务的口味/预算不该污染新任务）；
     #   - 用户在约束看板里**手动添加**的约束不在这个列表里，因此不会被清掉。
@@ -299,6 +304,7 @@ class GroupPurchaseSession:
             "order_status": self.order_status,
             "intent_query": self.intent_query,
             "intent_mode": self.intent_mode,
+            "force_probe_pending": self.force_probe_pending,
             "auto_constraint_ids": self.auto_constraint_ids,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -317,6 +323,7 @@ class GroupPurchaseSession:
             constraints=constraints,
             intent_query=data.get("intent_query"),
             intent_mode=data.get("intent_mode", "group"),
+            force_probe_pending=bool(data.get("force_probe_pending", False)),
             auto_constraint_ids=list(data.get("auto_constraint_ids") or []),
             created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
             updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat())),

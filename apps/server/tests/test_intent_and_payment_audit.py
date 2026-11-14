@@ -85,7 +85,7 @@ def channel3_stub(monkeypatch):
     async def _fake_search(query: str, limit: int = 20):  # noqa: ARG001 - 与真实签名一致
         return [dict(it) for it in items]
 
-    async def _fake_search_status(query: str, limit: int = 20):  # noqa: ARG001
+    async def _fake_search_status(query: str, limit: int = 20, force_probe: bool = False):  # noqa: ARG001
         return _result([dict(it) for it in items])
 
     monkeypatch.setattr(

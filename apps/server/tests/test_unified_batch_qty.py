@@ -252,7 +252,7 @@ def test_unified_main_budget_too_tight_returns_none():
 # ---------- 集成：monkeypatch _retrieve_catalog ----------
 
 async def _fake_retrieve(items):
-    async def _fake(query, use_channel3):
+    async def _fake(query, use_channel3, force_probe=False):  # noqa: ARG001
         # 7 元组（P2-④ 起 _retrieve_catalog 契约）：候选数 = 本地目录条数
         return (list(items), "k1_catalog", query, "", [], "disabled", len(items))
     return _fake

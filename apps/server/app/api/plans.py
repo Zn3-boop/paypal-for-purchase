@@ -194,6 +194,10 @@ async def regenerate_plans(session_id: str = Query(...)):
     session.order_id = None
     if session.state == "plan_generated":
         session.state = "constraint_collection"
+    # 半开探针：显式「重新生成方案」= 用户人工介入，允许下一次真实生成
+    # （快照为空的 GET /plans）在 Channel3 熔断期内放行一次真实探测。
+    # 成功即关熔断 + 入缓存；失败维持短路。只给一次，消费后即 False。
+    session.force_probe_pending = True
     update_session(session)
 
     return {
@@ -247,12 +251,23 @@ async def list_plans(session_id: str = Query(...)):
         budget_limit = total_budget_cap(constraints)
 
         # Generate dual plans
+        # 半开探针（一次性消费）：用户显式点过「重新生成方案」后，本次真实生成
+        # 允许绕 Channel3 熔断发一次探测。读取即清标记并落盘 —— 无论本次生成
+        # 成败都不用第二次（熔断期内 5s 轮询的后续 GET 恢复「短路自动重试」）。
+        force_probe = bool(getattr(session, "force_probe_pending", False))
+        if force_probe:
+            session.force_probe_pending = False
+            try:
+                update_session(session)
+            except Exception:
+                logger.debug("force_probe flag consume persist failed", exc_info=True)
         result = await generate_dual_plans(
             intent_query=session.intent_query or "ECV 社团采购",
             constraints=constraints,
             min_items=5,
             max_items=8,
             use_channel3=bool(session.intent_query),
+            force_probe=force_probe,
         )
 
         # 无解判定用「plan 是否真的生成出来了」，而不是顶层 feasible：

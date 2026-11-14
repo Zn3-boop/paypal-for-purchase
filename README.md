@@ -180,6 +180,23 @@ writes the existing `cart_modified` audit event with
 用法：`apps/server/.env` 设置 `CHANNEL3_DNS_PIN=3.212.207.12,...`（逗号分隔）；换到正常网络清空即可。
 回归：`tests/test_channel3_client_resilience.py::test_dns_pin_pins_api_host_and_ignores_non_pin_hosts`。
 
+### Channel3 熔断与半开探针（显式重试不被 60s 冷窗挡住）
+
+检索侧的两层保护共用同一 `_retrieve_catalog` 路径（团购/单人无路径差异），时序根因回归见
+`test_channel3_client_resilience.py::test_cached_query_bypasses_open_circuit_but_fresh_query_short_circuits`：
+
+- **30min 缓存命中**（ok/empty 才入缓存，error 绝不）：返回之前真取到的数据，不需要新网络请求 → **绕过熔断秒回**；
+- **60s 熔断**：真实请求失败过一次后，未缓存的新词在窗口内被短路成 error（诚实降级本地目录），
+  避免「每轮重新生成都白等 3–20s」—— 代价是**自动重试**（5s 轮询 / 首次提交意图）在窗口内必然短路。
+
+**半开探针**解决「熔断期内用户显式重试也必败」的体验黑洞：用户点「🔄 重新生成方案」= 人工介入，
+`POST /plans/regenerate` 置 `force_probe_pending`（一次性），下一次真实生成以 `force_probe=True`
+绕熔断发**一次**真实探测——成功立刻关熔断并把结果入缓存（此后 30min 该词秒回），失败维持短路
+（60s 窗口不重置）。标记消费后即 False：之后的 5s 轮询照常被熔断挡，不会被反复轰炸网络。
+回归：`test_force_probe_bypasses_open_circuit_and_closes_on_success`、
+`test_force_probe_keeps_circuit_open_on_failure`、
+`test_force_probe_flag_flows_from_regenerate_to_planner`。
+
 ### 规格 B/C：MMR 重排 + 每张卡一个可复算原因码
 
 泳道的**排序**和**理由**都不是模型黑盒 —— 判定式全是纯函数，README 各一行：
@@ -480,7 +497,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 397 tests
+python -m pytest -q        # 401 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
