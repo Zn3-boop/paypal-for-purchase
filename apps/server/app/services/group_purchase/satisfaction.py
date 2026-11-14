@@ -233,14 +233,18 @@ SYNONYM_KEYWORDS.update(_APPAREL_SYNONYMS)
 # 版型/长度：同样是客观属性，商品标签里能核对（longline / midi / cropped）。
 # 注意不收裸 `long`：`Long Sleeve` 说的是袖子长度，不是衣长，会把短款判成 ✅。
 STYLE_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "中长款": ("中长", "longline", "midi", "knee-length", "long coat"),
-    "长款": ("长款", "maxi", "longline", "long coat"),
-    "短款": ("短款", "cropped", "short coat"),
+    # 2026-11-14 实测：Channel3 结构化属性里版型证据词是外衣写
+    # `outerwear-length-type: ['Hip length']`、上衣写 `top-length-type: ['Crop top']`。
+    # 词典只收裸 longline/midi/cropped 时，这些真实证据词一个都对不上 —— 又是
+    # 「数据里有、词典不认」。hip length ≈ 及臀/中长外套，crop ≈ 短款上衣，都在此补齐。
+    "中长款": ("中长", "longline", "midi", "knee-length", "long coat", "hip length", "hip-length"),
+    "长款": ("长款", "maxi", "longline", "long coat", "knee-length"),
+    "短款": ("短款", "cropped", "short coat", "crop", "crop top"),
     "宽松": ("宽松", "relaxed", "oversized", "loose"),
     "修身": ("修身", "slim fit", "fitted", "tailored", "slim"),
     # 「中长」单独成 key：抽取层口语常省略「款」字（「中长的大衣」→ content=中长），
     # 只有「中长款」key 时 `中长款 in 中长` 匹配不上 → 永远 ❔。
-    "中长": ("中长", "longline", "midi", "knee-length", "long coat"),
+    "中长": ("中长", "longline", "midi", "knee-length", "long coat", "hip length", "hip-length"),
     "加大": ("加大", "oversized", "extra large", "jumbo", "xl"),
 }
 # 主观质量词：没有评分/口碑字段可核对 → 一律 unknown

@@ -355,6 +355,20 @@ def _normalize_product(p: Any) -> dict[str, Any]:
             name = getattr(brand, "name", None)
             if name and str(name).strip() and str(name) not in tags:
                 tags.append(str(name).strip())
+        # 2026-11-14 实测：Channel3 Product 的 materials 与 structured_attributes
+        # （材质/颜色/版型/容量等结构化证据）不并入 tags 时，判定层「查得到却证明不了」——
+        # 保温杯 materials=['stainless steel']、外套 outerwear-length-type=['Hip length']
+        # 全被丢掉，用户约束「不锈钢/中长款」永远 ❔。这两类字段是商品**结构化声明**，
+        # 不是图像推测，并入 tags 后判定层（_text_of 含 tags）可直接核对。
+        for material in list(getattr(p, "materials", None) or []):
+            text = str(material).strip()
+            if text and text not in tags:
+                tags.append(text)
+        for values in dict(getattr(p, "structured_attributes", None) or {}).values():
+            for value in list(values or []):
+                text = str(value).strip()
+                if text and text not in tags:
+                    tags.append(text)
         image_url = ""
         images = list(getattr(p, "images", None) or [])
         if images:
