@@ -131,23 +131,15 @@ def _log_payment_completed(
 
 
 def _extract_budget_limit(session) -> float | None:
-    """从会话约束中提取最严格的硬预算上限（无硬预算约束返回 None）。
+    """从会话约束中提取组合总价上限（无 total 硬预算返回 None）。
 
     D2 主门依据：支付前必须显式 check_budget，预算超限不允许创建 PayPal 订单。
+    只认 scope="total"：单件预算（per_item）约束每件单价，拿它当总价门槛会把
+    「单件 ≤ $240 × 32 双」判成超支并挡住支付（2026-11-13 实测）。
     """
-    limit: float | None = None
-    for c in getattr(session, "constraints", []) or []:
-        if getattr(c, "type", None) != "budget":
-            continue
-        if not getattr(c, "hard", False):
-            continue  # 软预算不做强制拦截
-        if getattr(c, "status", "active") != "active":
-            continue
-        nv = getattr(c, "numeric_value", None)
-        if nv is None:
-            continue
-        limit = float(nv) if limit is None else min(limit, float(nv))
-    return limit
+    from app.services.group_purchase.constraints import total_budget_cap
+
+    return total_budget_cap(getattr(session, "constraints", None))
 
 
 def _get_or_create_order(session, user_id: str, total: float, items: list[dict]):

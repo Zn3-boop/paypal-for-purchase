@@ -26,16 +26,10 @@ class QuantityUpdate(BaseModel):
 
 
 def _hard_budget(session) -> float | None:
-    """当前会话的硬预算上限；多成员时取最小值（任一成员超了都算超）。"""
-    limits = [
-        float(c.numeric_value)
-        for c in session.constraints
-        if c.status == "active"
-        and c.type == "budget"
-        and c.hard
-        and c.numeric_value
-    ]
-    return min(limits) if limits else None
+    """当前会话的组合总价上限（多成员取最小值）；单件预算不算总额门槛。"""
+    from app.services.group_purchase.constraints import total_budget_cap
+
+    return total_budget_cap(session.constraints)
 
 
 def _cart_body(session) -> dict:
@@ -302,6 +296,71 @@ async def modify_cart(session_id: str = Query(...), req: ModifyRequest = None):
     except Exception as e:
         logger.exception("Cart modification failed: %s", e)
         raise HTTPException(status_code=500, detail=f"修改失败：{e}")
+
+
+@router.post("/items/{item_id}")
+async def add_cart_item(
+    item_id: str,
+    session_id: str = Query(...),
+):
+    """把方案快照里的**某一单品**加进购物车 —— 单选用户的出口。
+
+    为什么需要它：`select_plan` 是整份方案入车（replace/append），对「我只想买一件」的
+    用户意味着先装进 8~16 件再逐个删 —— 录屏/真实使用都抱怨过。这里提供按件加购：
+      - 商品必须来自**当前会话的方案快照**（selected_plan / plan_a / plan_b），
+        不允许前端伪造任意商品（价格、来源都由快照决定，购物车不藏假货）；
+      - 已在购物车 → 数量 +1；不在 → 以方案快照为准克隆入车；
+      - 写 cart_modified（add_item）审计，返回真实购物车 + guardrail 事实。
+    """
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 从方案快照里定位该商品（按优先级 selected_plan → plan_a → plan_b）
+    source_item: PlanItem | None = None
+    for plan in (session.selected_plan, session.plan_a, session.plan_b):
+        for it in (plan.items if plan else []):
+            if it.id == item_id:
+                source_item = it
+                break
+        if source_item is not None:
+            break
+    if source_item is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"方案快照里没有商品 {item_id}（只能从方案里按件加购，防止伪造商品/价格）",
+        )
+
+    items = list(session.cart_items)
+    old_total = round(calc_total([i.to_dict() for i in items]), 2)
+
+    existing = next((i for i in items if i.id == item_id), None)
+    if existing is not None:
+        existing.quantity = int(existing.quantity or 1) + 1
+        existing.subtotal = round(existing.price * existing.quantity, 2)
+    else:
+        clone = PlanItem.from_dict(source_item.to_dict())
+        clone.quantity = 1
+        clone.subtotal = round(clone.price, 2)
+        items.append(clone)
+    session.cart_items = items
+    update_session(session)
+    session.save_snapshot(reason="cart_item_added")
+
+    new_total = round(calc_total([i.to_dict() for i in session.cart_items]), 2)
+    _audit_cart_change(session, "add_item", [item_id], old_total, new_total)
+
+    body = _cart_body(session)
+    return {
+        "success": True,
+        "message": f"已加入 {source_item.name} × 1（购物车 ${new_total:.2f}）",
+        "item_id": item_id,
+        "quantity": existing.quantity if existing is not None else 1,
+        "old_total": old_total,
+        "new_total": new_total,
+        "cart": body,
+        "guardrail": _guardrail(session.get_latest_cart(), _hard_budget(session)),
+    }
 
 
 @router.patch("/items/{item_id}")

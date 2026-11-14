@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from app.services.group_purchase.budget_guardrail import calc_total
-from app.services.group_purchase.constraints import Constraint
+from app.services.group_purchase.constraints import Constraint, total_budget_cap
 from app.services.group_purchase.fallback import generate_fallback_message
 from app.services.group_purchase.prompts import (
     CartModificationOutput,
@@ -511,9 +511,8 @@ async def execute_modifications(
     new_total = calc_total([{"price": it.price, "quantity": it.quantity} for it in current_cart])
     delta = new_total - old_total
     
-    # 预算检查
-    budget_constraints = [c for c in session.constraints if c.type == "budget" and c.hard and c.status == "active"]
-    budget_limit = min([c.numeric_value for c in budget_constraints if c.numeric_value]) if budget_constraints else None
+    # 预算检查（只认组合总价上限：单件预算不能当购物车总额门槛）
+    budget_limit = total_budget_cap(session.constraints)
     
     budget_ok = True
     fallback = None

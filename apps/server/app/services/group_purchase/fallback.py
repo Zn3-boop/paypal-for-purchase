@@ -77,18 +77,25 @@ def generate_fallback_message(
         )
         if effective_budget is not None and min_price <= effective_budget:
             # Cheapest item fits, so the empty result came from other filters, not the budget.
+            # Bug 3（评审）：真实的常见原因是「候选目录没覆盖该品类」——K1 示例目录只有
+            # 45 件（保温瓶/桌游/帆布包），没有键盘/牛仔裤/围巾；此时让用户"调整约束"
+            # 等于往错误方向引。文案诚实化：直说目录可能没覆盖，并给出可操作的两个方向。
             return {
                 "ok": False,
                 "status": "no_feasible_plan",
                 "message": (
-                    "⚠️ 在当前约束条件下，找不到可行的商品组合。\n\n"
-                    "预算本身并不算紧，问题更可能出在其他硬约束（禁忌/功能）过严，"
-                    "或商品目录与需求不匹配。\n\n请调整约束后重试。"
+                    "⚠️ 当前约束下没有可行组合。\n\n"
+                    "预算本身并不算紧，问题更可能出在：\n"
+                    "· 当前商品目录未覆盖所需品类（本地示例目录仅含 45 件示例商品，"
+                    "不含键盘/牛仔裤/围巾等品类属正常）\n"
+                    "· 其他硬约束（禁忌/功能）过严\n\n"
+                    "可点「🔄 重新生成方案」让系统换一批检索词重试，"
+                    "或切换 Channel3 检索真实商品目录。"
                 ),
                 "reason": "constraint_conflict",
                 "suggestions": [
+                    {"action": "重新生成方案", "detail": "换英文检索词重试（系统会先打英文关键词再打中文原句）", "estimated_impact": "可能命中 Channel3 真实商品"},
                     {"action": "放宽禁忌/功能约束", "detail": "暂时将某条硬约束改为软约束", "estimated_impact": "扩大可选范围"},
-                    {"action": "提高预算", "detail": "尝试将预算提高 20-30%", "estimated_impact": "扩大可选范围"},
                 ],
             }
         suggestions = [

@@ -20,6 +20,14 @@ ConstraintStatus = Literal["active", "modified", "removed"]
 # 预算冲突判定阈值：两位成员的预算报价相差超过该倍数即视为冲突
 BUDGET_CONFLICT_RATIO = 1.4
 
+# 「单件预算」语义标记（2026-11-13 现场实测 P0）：content 里出现这些词，预算约束的是
+# **每一件的单价**，不是组合总价。LLM 抽取路径（source=agent_composer）经常丢掉 scope，
+# 把「单件预算≤180」写成 scope=total —— 后果是：
+#   ① 22 件 × $49.98 = $1099 会被当成「总价超 $180」，方案被判不可行；
+#   ② 逐件表对 total 预算一律返回 n/a，前端渲染成 ❔，用户看到「组合 ✅ / 每件 ❔」自相矛盾。
+# 文案里已经明说「单件」，语义就不该再由一个可能缺失的字段决定。
+_PER_ITEM_HINTS = ("单件", "每件", "单个", "单价", "per item", "per-item")
+
 
 @dataclass
 class Constraint:
@@ -39,7 +47,22 @@ class Constraint:
     # 结构化字段（可选，用于精确计算）
     numeric_value: float | None = None  # 如预算金额
     category: str | None = None         # 如"环保材料"
-    
+    # 预算作用域：total=组合总价（默认）/ per_item=单件单价（用户说"单件预算不超 X"时）
+    # Bug 1 修复（评审）："单件预算 160" 不能被当成"总预算 160"——否则 8 件方案必然超支 8 倍。
+    scope: Literal["total", "per_item"] = "total"
+
+    def __post_init__(self) -> None:
+        """让 scope 与 content 文案对齐：明说「单件」就必须按逐件判定。
+
+        为什么放在构造函数而不是抽取层（2026-11-13 实测）：约束有三个来源 ——
+        规则抽取、LLM 抽取（agent_composer）、会话 JSON 恢复。只在其中一处修，
+        另外两处仍会把「单件预算」存成 total，界面就继续「组合 ✅ / 每件 ❔」。
+        """
+        if self.type == "budget" and any(
+            hint in (self.content or "").lower() for hint in _PER_ITEM_HINTS
+        ):
+            self.scope = "per_item"
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -52,6 +75,7 @@ class Constraint:
             "updated_at": self.updated_at,
             "numeric_value": self.numeric_value,
             "category": self.category,
+            "scope": self.scope,
         }
 
     @classmethod
@@ -70,6 +94,10 @@ class Constraint:
             except (TypeError, ValueError):
                 numeric = None
         now = datetime.now(timezone.utc).isoformat()
+        scope = data.get("scope")
+        if scope not in ("total", "per_item"):
+            # 旧数据没有 scope → 默认 total；"单件"字样兜底识别
+            scope = "per_item" if "单件" in str(data.get("content") or "") else "total"
         return cls(
             id=str(data.get("id") or ""),
             type=ctype,
@@ -81,7 +109,33 @@ class Constraint:
             updated_at=str(data.get("updated_at") or now),
             numeric_value=numeric,
             category=data.get("category"),
+            scope=scope,
         )
+
+
+def total_budget_cap(constraints) -> float | None:
+    """组合总价上限：只认 scope="total" 的硬预算约束（多成员取最严的一条）。
+
+    2026-11-13 现场实测 P0：这条规则此前散在 7 个地方（plans / paypal_callback /
+    cart / cart_modifier / recommendations ×2 / planner），每处都写
+    `min(c.numeric_value for ... if c.type == "budget")` —— 没有一处看 scope。
+    于是「单件预算 ≤ $240，采购 32 双」被当成「组合总价上限 $240」：
+      · 方案合计 $1179.37 → 界面显示「预算 $240 · 491% · 超支 $939.37 · 🚨 拦截」
+      · 同屏约束判定却是「✅ 单件预算≤240，全部 14 件单价 ≤ $240」
+    两个面板互相打脸，且支付前的 D2 主门会真的把订单挡下来。
+    per_item 约束约束的是**每件单价**：它在 prefilter 逐件剔除 + satisfaction
+    逐件判定里生效，绝不能拿来当购物车总额门槛。
+    """
+    caps = [
+        float(c.numeric_value)
+        for c in (constraints or [])
+        if getattr(c, "type", None) == "budget"
+        and getattr(c, "hard", False)
+        and getattr(c, "status", "active") == "active"
+        and getattr(c, "numeric_value", None)
+        and getattr(c, "scope", "total") == "total"
+    ]
+    return min(caps) if caps else None
 
 
 @dataclass

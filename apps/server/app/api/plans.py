@@ -239,12 +239,12 @@ async def list_plans(session_id: str = Query(...)):
 
         constraints = session.constraints or []
         
-        # Extract budget limit from hard budget constraints
-        budget_constraint = next(
-            (c for c in constraints if c.type == "budget" and c.status == "active" and c.hard and c.numeric_value),
-            None
-        )
-        budget_limit = budget_constraint.numeric_value if budget_constraint else None
+        # 组合总价上限：只认 scope=total（单件预算是逐件门槛，见 total_budget_cap）。
+        # 此前这里直接取第一条 budget 约束的 numeric_value ——「单件预算 ≤ $240 × 32 双」
+        # 被当成组合预算 240，方案 $1179.37 显示 491% 超支并触发 🚨 Guardrail 拦截。
+        from app.services.group_purchase.constraints import total_budget_cap
+
+        budget_limit = total_budget_cap(constraints)
 
         # Generate dual plans
         result = await generate_dual_plans(
@@ -255,10 +255,31 @@ async def list_plans(session_id: str = Query(...)):
             use_channel3=bool(session.intent_query),
         )
 
-        if not result.get("feasible"):
+        # 无解判定用「plan 是否真的生成出来了」，而不是顶层 feasible：
+        # feasible=False 有两种——①真无解（J 模块触发 fallback，plan_a/plan_b 为 None）；
+        # ②数量不足但方案仍在（评审盯点②：plan 级 feasible=False + quantity_note，
+        # 前端照常渲染方案卡 + 黄色数量警示条）。把 ② 也吞进无解卡会丢方案，违背诚实展示。
+        plan_a_raw = result.get("plan_a")
+        plan_b_raw = result.get("plan_b")
+        if plan_a_raw is None or plan_b_raw is None:
             # 无解也把检索证据带上：赞助商 Channel3 的最接近商品仍要能单独展示，
             # 否则用户只看到「无解」，连"赞助商那边到底找到什么"都无从判断。
             infeasible_meta = result.get("retrieval") or {}
+
+            # 满足度诊断（无解场景最有价值）：用候选池全量当"组合"跑一遍判定，
+            # 逐条告诉用户是「确证违反」还是「目录里没有证据/没有这个品类」。
+            # 没有这块，用户只看到一句「找不到可行组合」，不知道该改哪条约束。
+            infeasible_satisfaction = None
+            try:
+                catalog_all = get_k1_items()
+                infeasible_satisfaction = evaluate_satisfaction(
+                    constraints, catalog_all, budget_limit=budget_limit,
+                )
+                # 无解场景不需要逐件表（45 件 × N 条约束），只保留「哪条卡住」
+                infeasible_satisfaction.pop("items", None)
+            except Exception as exc:  # 诊断失败不能把无解响应本身搞崩
+                logger.warning("infeasible satisfaction diagnostics failed: %s", exc)
+
             return {
                 "feasible": False,
                 "fallback": result.get("fallback"),
@@ -268,12 +289,16 @@ async def list_plans(session_id: str = Query(...)):
                 "intent_query": session.intent_query,
                 "intent_mode": getattr(session, "intent_mode", "group"),
                 "constraint_count": len(constraints),
+                # 无解时的约束诊断：scope=catalog 表示"在候选池全量上判的覆盖情况"
+                "satisfaction": infeasible_satisfaction,
+                "satisfaction_scope": "catalog",
                 "retrieval": {
                     "query": session.intent_query or "ECV 社团采购",
                     "search_query": infeasible_meta.get("search_query") or (session.intent_query or ""),
                     "source": result.get("source", "k1_catalog"),
                     "candidate_count": infeasible_meta.get("candidate_count", 0),
                     "matched_count": infeasible_meta.get("matched_count", 0),
+                    "filtered_count": infeasible_meta.get("filtered_count", 0),
                     "note": infeasible_meta.get("note", ""),
                     "channel3_status": infeasible_meta.get("channel3_status", ""),
                     "sponsor_related": infeasible_meta.get("sponsor_related", []),
@@ -283,8 +308,7 @@ async def list_plans(session_id: str = Query(...)):
 
         catalog = get_k1_items()
 
-        # Process Plan A
-        plan_a_raw = result.get("plan_a", {})
+        # Process Plan A（plan_a_raw 已在无解判定处取出；走到这里必为 dict）
         plan_a_data = {
             "plan_id": "A",
             "strategy": plan_a_raw.get("strategy", "低价优先"),
@@ -296,6 +320,11 @@ async def list_plans(session_id: str = Query(...)):
             "trade_offs": plan_a_raw.get("trade_offs", []),
             "risks": plan_a_raw.get("risks", []),
             "source": plan_a_raw.get("source", "k1_catalog"),
+            # 数量诚实透传（评审盯点②）：plan 级 feasible / 短缺标记 / 说明文案，
+            # 前端据此渲染黄色数量警示条（soft_cap 警示条旁），不冒充「需求已满足」。
+            "feasible": plan_a_raw.get("feasible", True),
+            "quantity_shortfall": plan_a_raw.get("quantity_shortfall", False),
+            "quantity_note": plan_a_raw.get("quantity_note"),
         }
         # 满足度总账（纯计算）：组合级 N/M 条 + 逐条 ✅/❌/❔ + 证据串。
         # 快照回放时随 payload 一起回放，无需重算。
@@ -329,8 +358,7 @@ async def list_plans(session_id: str = Query(...)):
                     resolution=guardrail_a["resolution"],
                 )
 
-        # Process Plan B
-        plan_b_raw = result.get("plan_b", {})
+        # Process Plan B（plan_b_raw 已在无解判定处取出；走到这里必为 dict）
         plan_b_data = {
             "plan_id": "B",
             "strategy": plan_b_raw.get("strategy", "耐用优先"),
@@ -342,6 +370,9 @@ async def list_plans(session_id: str = Query(...)):
             "trade_offs": plan_b_raw.get("trade_offs", []),
             "risks": plan_b_raw.get("risks", []),
             "source": plan_b_raw.get("source", "k1_catalog"),
+            "feasible": plan_b_raw.get("feasible", True),
+            "quantity_shortfall": plan_b_raw.get("quantity_shortfall", False),
+            "quantity_note": plan_b_raw.get("quantity_note"),
         }
         plan_b_data["satisfaction"] = evaluate_satisfaction(
             constraints, plan_b_data["items"], budget_limit=budget_limit,
@@ -374,12 +405,20 @@ async def list_plans(session_id: str = Query(...)):
 
         # Helper: derive sacrificed members from unmet constraints
         def get_sacrificed_members(plan: dict) -> list[str]:
-            member_set = set()
+            """未满足约束的「归属方」。多人团购时 source 是成员名（如 alice/bob）；
+            单人场景 source 是 agent_composer/system 等**来源标识**，对用户没有信息量，
+            这时改显示约束内容本身（「未满足：设计感（缺评分数据）」）。"""
+            labels: list[str] = []
+            generic_sources = {"agent_composer", "system", "", "planner", "demo"}
             for cid in plan.get("unmet_constraints", []):
                 cons = next((c for c in constraints if c.id == cid), None)
-                if cons and cons.source:
-                    member_set.add(cons.source)
-            return sorted(member_set)
+                if not cons:
+                    continue
+                src = (cons.source or "").strip()
+                label = src if src and src.lower() not in generic_sources else (cons.content or "未知约束")
+                if label not in labels:
+                    labels.append(label)
+            return labels
 
         plans_data = [
             {**plan_a_data, "sacrificed_members": get_sacrificed_members(plan_a_data)},
@@ -408,7 +447,10 @@ async def list_plans(session_id: str = Query(...)):
 
         retrieval_meta = result.get("retrieval") or {}
         payload = {
-            "feasible": True,
+            # 顶层可行性与方案解耦：真无解走上面分支；这里 plan 一定存在，
+            # 但数量不足（硬数量短缺）时顶层仍诚实标 False（评审盯点②），
+            # 前端有 plan 就正常渲染方案卡 + 数量警示条，不误入无解卡。
+            "feasible": result.get("feasible", True),
             "data_source": result.get("source", "k1_catalog"),
             "plans": plans_data,
             "comparison": result.get("comparison", {}),
@@ -423,6 +465,7 @@ async def list_plans(session_id: str = Query(...)):
                 "source": result.get("source", "k1_catalog"),
                 "candidate_count": retrieval_meta.get("candidate_count", 0),
                 "matched_count": retrieval_meta.get("matched_count", 0),
+                "filtered_count": retrieval_meta.get("filtered_count", 0),
                 "note": retrieval_meta.get("note", ""),
                 "channel3_status": retrieval_meta.get("channel3_status", ""),
                 "sponsor_related": retrieval_meta.get("sponsor_related", []),

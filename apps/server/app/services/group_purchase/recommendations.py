@@ -38,6 +38,7 @@ from typing import Any
 
 from app.services.group_purchase import mmr, reason_codes
 from app.services.group_purchase.budget_guardrail import check_budget
+from app.services.group_purchase.constraints import total_budget_cap
 from app.services.group_purchase.planner import (
     _is_relevant_item,
     _query_tokens,
@@ -197,12 +198,8 @@ def _plan_dicts(session: Any) -> list[dict[str, Any]]:
 
 
 def _hard_budget(session: Any) -> float | None:
-    limits = [
-        float(c.numeric_value)
-        for c in (getattr(session, "constraints", None) or [])
-        if getattr(c, "type", "") == "budget" and getattr(c, "hard", False) and getattr(c, "numeric_value", None)
-    ]
-    return min(limits) if limits else None
+    """组合总价上限（单件预算 scope=per_item 不算总额门槛）。"""
+    return total_budget_cap(getattr(session, "constraints", None))
 
 
 def _cheapest_plan_total(session: Any) -> float:
@@ -462,12 +459,7 @@ def add_recommendation_to_cart(
     old_total = round(sum(i.price * i.quantity for i in current), 2)
     new_total = round(old_total + float(entry["price"]), 2)
 
-    limits = [
-        float(c.numeric_value)
-        for c in session.constraints
-        if c.type == "budget" and c.hard and c.numeric_value
-    ]
-    budget = min(limits) if limits else None
+    budget = total_budget_cap(session.constraints)
 
     if budget is not None and new_total > budget and not force:
         return {
