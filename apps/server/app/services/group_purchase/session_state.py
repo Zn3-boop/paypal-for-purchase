@@ -23,9 +23,84 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.paths import data_dir
 from app.services.group_purchase.constraints import Constraint, ConstraintManager
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# 会话生命周期：滑动窗口 + 读路径惰性过期
+# ============================================================
+# 参考 Django Session 的读路径惰性判定（`expire_date__gt=now` 直接把过期行过滤掉）：
+# **不是定时删除，而是"读的时候就不返回"**。本项目单进程、demo 规模（几百个 JSON），
+# 定时清理只是额外复杂度；保证正确性只需要下面这一半。
+#
+# TTL 是**滑动窗口**：每次读/写都 touch 一次 last_active_at。
+# 落盘策略参考 express-session 的 `touch()`：只在剩余时间不足一半时才写盘，
+# 避免前端 3~5 秒一次的轮询把整个会话 JSON 反复重写。
+DEFAULT_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 小时
+
+
+def get_session_ttl_seconds() -> float:
+    """读取 TTL（`SESSION_TTL_SECONDS` 可覆盖；<=0 表示关闭过期，便于长演示）。"""
+    try:
+        return float(os.getenv("SESSION_TTL_SECONDS", str(DEFAULT_SESSION_TTL_SECONDS)))
+    except ValueError:
+        return float(DEFAULT_SESSION_TTL_SECONDS)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_aware(value: datetime) -> datetime:
+    """`fromisoformat` 可能拿到 naive 时间（老文件 / 手写数据），统一按 UTC 解释。"""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def is_session_expired(session: "GroupPurchaseSession", now: datetime | None = None) -> bool:
+    """会话是否已过 TTL（纯判定，不改状态）。
+
+    老会话文件没有 last_active_at 时退化为 updated_at —— 这意味着**历史残留文件
+    在升级后第一次被读到就会按真实空闲时长判过期**，正是想要的清理效果。
+    """
+    ttl = get_session_ttl_seconds()
+    if ttl <= 0:
+        return False
+    last = _as_aware(session.last_active_at or session.updated_at)
+    current = _as_aware(now or _utc_now())
+    return (current - last).total_seconds() > ttl
+
+
+def get_session_expires_in_seconds(session: "GroupPurchaseSession", now: datetime | None = None) -> int | None:
+    """距离过期还剩多少秒（供前端倒计时）；TTL<=0（关闭过期）时返回 None。"""
+    ttl = get_session_ttl_seconds()
+    if ttl <= 0:
+        return None
+    last = _as_aware(session.last_active_at or session.updated_at)
+    current = _as_aware(now or _utc_now())
+    return max(0, int(ttl - (current - last).total_seconds()))
+
+
+def touch_session(session: "GroupPurchaseSession") -> None:
+    """标记会话「活跃」并落盘 —— **只允许写路径调用**。
+
+    为什么读路径绝对不能 touch：前端每 3~5 秒轮询一次 `GET /session/{id}/status`、
+    `GET /plans`、`GET /cart`。若读也续期，TTL 就永远走不到点 —— 用户开着标签页
+    睡一晚，第二天回来旧约束/旧方案原样复活。那等于「做了一个 TTL，又用轮询把它废了」，
+    比不做更糟：因为你会以为它生效了。
+
+    因此 TTL 的分界线是**有没有产生新的业务事实**：
+      - ✅ touch：提交需求、加/改/删购物车、选方案、复核、建单/支付
+      - ❌ 不 touch：status、GET plans、GET cart、任何轮询与只读查询
+
+    这同时也是 Django Session 的默认语义（`SESSION_SAVE_EVERY_REQUEST=False`）：
+    只有会话被**修改**才刷新失效时间。
+    """
+    session.last_active_at = _utc_now()
+    save_session_to_disk(session)
+
 
 
 @dataclass
@@ -201,6 +276,9 @@ class GroupPurchaseSession:
     auto_constraint_ids: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # 最后一次读/写时间（滑动窗口）。TTL 空闲判定只用它，不参与业务逻辑。
+    # 老文件没有这个字段时按 updated_at 兜底（见 from_dict / is_session_expired）。
+    last_active_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     
     # 历史快照（用于撤销）
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -224,6 +302,7 @@ class GroupPurchaseSession:
             "auto_constraint_ids": self.auto_constraint_ids,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "last_active_at": self.last_active_at.isoformat(),
             "history": self.history[-10:],  # 保留最近 10 个快照
         }
     
@@ -241,6 +320,14 @@ class GroupPurchaseSession:
             auto_constraint_ids=list(data.get("auto_constraint_ids") or []),
             created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
             updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat())),
+            # 老文件没有 last_active_at：退回 updated_at（真实空闲时长），
+            # 让残留会话在升级后第一次读到就按实际过期被清理，而不是被"续命"。
+            last_active_at=datetime.fromisoformat(
+                data.get("last_active_at")
+                or data.get("updated_at")
+                or data.get("created_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
         )
         
         if data.get("plan_a"):
@@ -317,8 +404,8 @@ _SESSION_SCHEMA_VERSION = 1
 
 
 def get_sessions_dir() -> Path:
-    """会话目录（`SESSION_STORE_DIR` 可覆盖：测试用 tmp_path，部署可挂载卷）。"""
-    return Path(os.getenv("SESSION_STORE_DIR", "./data/sessions"))
+    """会话目录（`SESSION_STORE_DIR` 可覆盖；默认锚定 apps/server/data，不随 cwd 漂移）。"""
+    return data_dir("SESSION_STORE_DIR", "sessions")
 
 
 def get_session_file(session_id: str) -> Path:
@@ -355,50 +442,93 @@ def _load_session_file(session_id: str) -> GroupPurchaseSession | None:
 
 
 def load_sessions_from_disk() -> int:
-    """启动时回放 data/sessions/*.json；内存里已有的会话不会被覆盖。"""
+    """启动时回放 data/sessions/*.json；内存里已有的会话不会被覆盖。
+
+    过期会话直接跳过并删除文件 —— 惰性清理的"启动时那一半"：
+    进程重启是比较少见的事件，顺手删掉已过 TTL 的残留，避免目录无限增长。
+    """
     directory = get_sessions_dir()
     if not directory.exists():
         return 0
     restored = 0
+    expired = 0
     for path in sorted(directory.glob("*.json")):
         try:
             session = GroupPurchaseSession.from_dict(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.warning("session restore skipped (%s): %s", path.name, exc)
             continue
+        if is_session_expired(session):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover
+                pass
+            expired += 1
+            continue
         with _session_lock:
             if session.session_id not in _sessions:
                 _sessions[session.session_id] = session
                 restored += 1
+    if expired:
+        logger.info("session expired at startup: %d file(s) removed", expired)
     return restored
 
 
 def get_or_create_session(session_id: str, user_id: str) -> GroupPurchaseSession:
-    """获取或创建会话。"""
+    """获取或创建会话。
+
+    过期会话视同不存在：直接丢弃（内存 + 磁盘）并新建一个空会话。
+    这是「跨天回来看到上次的约束/方案/购物车」这个问题的修复点 ——
+    不需要用户点任何按钮，也不需要换 user_id。
+    """
+    existing = get_session(session_id)
+    if existing is not None:
+        return existing
     with _session_lock:
-        if session_id not in _sessions:
+        # 并发下另一个线程可能已经建好了；以内存里最先落位的为准。
+        session = _sessions.get(session_id)
+        if session is None:
             session = GroupPurchaseSession(session_id=session_id, user_id=user_id)
             _sessions[session_id] = session
-            save_session_to_disk(session)
-            return session
-        return _sessions[session_id]
+        save_session_to_disk(session)
+        return session
 
 
 def get_session(session_id: str) -> GroupPurchaseSession | None:
-    """获取会话：内存优先；内存没有（例如刚重启）就从磁盘 JSON 恢复。"""
+    """获取会话：内存优先；内存没有（例如刚重启）就从磁盘 JSON 恢复。
+
+    **纯读，不 touch、不写盘。** 过期判定在**读路径**完成（Django Session 的做法）：
+    过期就是 None，上层 API 自然返回 404 / exists=false，前端已有的自举逻辑
+    会自动用同一个 session_id 建新会话。
+
+    为什么读不续期：轮询也算"读"。详情见 touch_session 的文档。
+    """
     with _session_lock:
         cached = _sessions.get(session_id)
     if cached is not None:
+        if is_session_expired(cached):
+            delete_session(session_id)
+            logger.info("session expired on read: %s", session_id)
+            return None
         return cached
     restored = _load_session_file(session_id)
     if restored is None:
+        return None
+    if is_session_expired(restored):
+        delete_session(session_id)
+        logger.info("session expired on restore: %s", session_id)
         return None
     with _session_lock:
         return _sessions.setdefault(session_id, restored)
 
 
 def update_session(session: GroupPurchaseSession) -> None:
-    """更新会话：内存 + 磁盘（原子写）。"""
+    """更新会话（写路径）：刷新 last_active_at + 内存 + 磁盘（原子写）。
+
+    这是 TTL 唯一会续期的地方 —— 所有业务写操作最终都收敛到这里。
+    """
+    session.last_active_at = _utc_now()
+    session.updated_at = session.last_active_at
     with _session_lock:
         _sessions[session.session_id] = session
     save_session_to_disk(session)
@@ -416,8 +546,10 @@ def delete_session(session_id: str) -> bool:
 
 
 def list_sessions(user_id: str | None = None) -> list[GroupPurchaseSession]:
-    """列出会话。"""
+    """列出会话（过期的不列出 —— 与 get_session 的读路径判定保持一致）。"""
     with _session_lock:
-        if user_id:
-            return [s for s in _sessions.values() if s.user_id == user_id]
-        return list(_sessions.values())
+        sessions = list(_sessions.values())
+    sessions = [s for s in sessions if not is_session_expired(s)]
+    if user_id:
+        return [s for s in sessions if s.user_id == user_id]
+    return sessions

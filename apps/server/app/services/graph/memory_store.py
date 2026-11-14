@@ -8,6 +8,8 @@ from typing import Any
 
 from filelock import FileLock
 
+from app.paths import data_dir
+
 logger = logging.getLogger(__name__)
 
 EVIDENCE_LEVEL_A = "A"
@@ -28,10 +30,7 @@ class MemoryStore:
     """
 
     def __init__(self, store_dir: str = ""):
-        self.store_dir = store_dir or os.getenv(
-            "GRAPH_MEMORY_STORE_DIR",
-            "./memory_store",
-        )
+        self.store_dir = store_dir or str(data_dir("GRAPH_MEMORY_STORE_DIR", "memory_store"))
         os.makedirs(self.store_dir, exist_ok=True)
         self._lock_path = os.path.join(self.store_dir, ".memory_store.lock")
         self._lock = FileLock(self._lock_path, timeout=10)

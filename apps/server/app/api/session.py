@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from app.services.group_purchase.session_state import (
     get_or_create_session,
     get_session,
+    get_session_expires_in_seconds,
+    get_session_ttl_seconds,
     update_session,
 )
 
@@ -124,6 +126,12 @@ async def get_session_status(session_id: str) -> dict:
         "cart_items_count": len(session.cart_items),
         "audit_log_count": len(session.history),
         "has_split_preview": bool(session.split_preview),
+        # ---- 会话生命周期（滑动窗口）：供前端显示倒计时，不给就由前端自己算 ----
+        # ttl_seconds<=0 表示关闭过期（长演示），此时 expires_in_seconds 为 None。
+        "last_active_at": session.last_active_at.isoformat() if session.last_active_at else None,
+        "updated_at": session.updated_at.isoformat(),
+        "ttl_seconds": get_session_ttl_seconds(),
+        "expires_in_seconds": get_session_expires_in_seconds(session),
         "budget_limit": next(
             (float(c.numeric_value) for c in session.constraints if c.type == "budget" and c.numeric_value),
             None,

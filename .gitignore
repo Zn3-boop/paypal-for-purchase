@@ -151,6 +151,9 @@ yarn-error.log*
 *~
 *.swp
 
+# 数据迁移备份（scripts/migrate_jsonl_to_pg.py 生成，含全部 JSONL 副本，绝不可入库）
+backups/
+
 # Package lock files
 apps/desktop/package-lock.json
 package-lock.json
@@ -195,3 +198,7 @@ scripts/calc_demo_numbers.py
 
 # Generated server frontend bundle
 apps/server/static/
+
+# 本地数据目录的时间戳备份（data.bak-YYYYMMDD-HHMMSS）：排查「数据目录按 cwd 解析」
+# 时留下的快照，属于本机运行痕迹，不进仓库。
+apps/server/data.bak-*/

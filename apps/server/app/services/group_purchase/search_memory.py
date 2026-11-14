@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.paths import data_dir
+
 logger = logging.getLogger(__name__)
 
 _SEARCHES_FILE = "searches.jsonl"
@@ -25,7 +27,7 @@ _lock = threading.Lock()
 
 
 def get_memory_dir() -> Path:
-    return Path(os.getenv("SEARCH_MEMORY_DIR", "./data/search_memory"))
+    return data_dir("SEARCH_MEMORY_DIR", "search_memory")
 
 
 def get_searches_file() -> Path:
