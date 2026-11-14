@@ -523,7 +523,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 401 tests
+python -m pytest -q        # 436 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
@@ -574,6 +574,20 @@ gaps (item descriptions missing a color/size field), subjective words ("音质")
 over-tight budgets that leave too few candidates ("雨伞 ≤ $45" keeps 5/20). The pure
 helper functions (`_prefilter_by_budget`, `_stats`) are unit-tested in
 `tests/test_quality_gate_helpers.py` and run offline in CI.
+
+**Offline honesty proof (no Channel3 key / no network needed):**
+`scripts/satisfaction_golden.py` replays the **6 live bad cases** fixed on
+2026-11-14 (capacity numeric semantics, fast-charge lexicon, shoe/matte
+counter-evidence) through the real `evaluate()` and prints
+before → root cause → current verdict + fired rule:
+
+```bash
+python scripts/satisfaction_golden.py   # 7/7 golden cases, exit 0; --json for CI
+```
+
+`docs/business_decomposition.md` is the one-page business decomposition —
+per-stage (input → processing → output → failure path → why) — so a judge can
+read the whole logic chain in one page instead of diffing this README.
 
 ## License
 
