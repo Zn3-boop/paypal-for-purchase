@@ -153,6 +153,21 @@ class TestRealFieldsTurnUnknownIntoSat:
         assert v["status"] == STATUS_SAT, v["reason"]
         assert "white" in v["evidence"].lower()
 
+    def test_jia_da_short_key_matches_large(self):
+        """2026-11-14 实测定死：「加大款」被抽取层切短成「加大」时，查的是 STYLE_KEYWORDS['加大']
+        的变体 —— 旧版只有 (oversized/extra large/jumbo/xl) 缺 `large`，商品 key_features 明明写
+        'Large capacity' 却判 ❔（「加大款」key 有 large 而「加大」没有，口语走哪个全看抽取层怎么切）。
+        补上 `large` 后，content=加大 必须命中 Large capacity。"""
+        item = _normalize_product(_product(**_item_kwargs(
+            name="Canvas Tote Bag", price=2.99,
+            desc="A large canvas tote bag for everyday use.",
+            materials=["canvas"],
+            attrs={"pattern": ["Solid"]},
+        )))
+        v = evaluate([_c(1, "functional", "加大")], [item])["constraints"][0]
+        assert v["status"] == STATUS_SAT, v["reason"]
+        assert "large" in v["evidence"].lower()
+
 
 # ── 三档：诚实红线不破 ──────────────────────────────────────────────
 class TestHonestyBoundary:

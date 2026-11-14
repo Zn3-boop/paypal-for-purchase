@@ -245,7 +245,11 @@ STYLE_KEYWORDS: dict[str, tuple[str, ...]] = {
     # 「中长」单独成 key：抽取层口语常省略「款」字（「中长的大衣」→ content=中长），
     # 只有「中长款」key 时 `中长款 in 中长` 匹配不上 → 永远 ❔。
     "中长": ("中长", "longline", "midi", "knee-length", "long coat", "hip length", "hip-length"),
-    "加大": ("加大", "oversized", "extra large", "jumbo", "xl"),
+    # 2026-11-14 实测修复：「加大款」→ 抽取层口语常抽成短词「加大」，而「加大」key 的
+    # 变体缺 `large` —— 商品 key_features 明明写 "Large capacity" 却判 ❔（「加大款」key
+    # 有 large、「加大」没有，用户口语走哪个全看抽取层怎么切）。`large` 是加大款的
+    # 直接英文证据，两个字面 key 都得收。（反面：裸 `long` 仍不收，防 Long Sleeve 误判。）
+    "加大": ("加大", "oversized", "extra large", "jumbo", "xl", "large"),
 }
 # 主观质量词：没有评分/口碑字段可核对 → 一律 unknown
 SUBJECTIVE_HINTS = (
