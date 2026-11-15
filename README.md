@@ -585,16 +585,18 @@ retrieval note no longer hardcodes a filtered count either (numbers live in stru
 
 ## Quality gate (extraction → retrieval → satisfaction)
 
-`scripts/quality_gate.py` runs the 20 template purchase sentences through the **real**
-pipeline — rule extraction, Channel3 search, per-constraint satisfaction verdicts — and
-sums the three status buckets. It doubles as a CI assertion gate:
+`scripts/quality_gate.py` runs the **30 template purchase sentences** (expanded from 20 on
+2026-11-14; each new sentence is annotated with the blind spot it covers — no filler) through
+the **real** pipeline — rule extraction, Channel3 search, per-constraint satisfaction
+verdicts — and sums the three status buckets. It doubles as a CI assertion gate:
 
 ```bash
 python scripts/quality_gate.py --json scripts/quality_baseline.json   # human + machine baseline
 python scripts/quality_gate.py --max-unknown 15 --min-sat 85          # fail (exit 1) if regression
 ```
 
-Baseline (2026-11-13): **sat=91, unsat=0, unknown=12** across 103 constraint judgments.
+Baseline (2026-11-13, 20-sentence snapshot): **sat=91, unsat=0, unknown=12** across 103
+constraint judgments; re-run `--json` after the 30-sentence expansion to refresh.
 `unsat=0` is meaningful because the gate *mirrors the real planner's budget prefilter*
 (`prefilter_by_constraints` drops items priced above a hard budget before judging), so
 "7 items over budget" shows up as fewer in-budget candidates, not as a false verdict that
@@ -603,6 +605,28 @@ gaps (item descriptions missing a color/size field), subjective words ("音质")
 over-tight budgets that leave too few candidates ("雨伞 ≤ $45" keeps 5/20). The pure
 helper functions (`_prefilter_by_budget`, `_stats`) are unit-tested in
 `tests/test_quality_gate_helpers.py` and run offline in CI.
+
+**Retrieval / re-ranking ablation (no hand-labeled ground truth):**
+`scripts/retrieval_ablation.py` replays one real Channel3 snapshot
+(`docs/retrieval_live.json`, 20 sentences × per-item results) through four re-ranking
+strategies — raw order vs. score-sorted vs. MMR with λ ∈ {0.3, 0.5, 0.7, 1.0} — and scores
+every top-k with the **production** `evaluate()`. All metrics (Hit@k / MRR /
+judgeable-rate / category diversity / price CV) therefore come from the real judgment
+function, not an annotation set. Result: MMR(λ≤0.7) lifts top-3 category diversity
+1.5 → 1.75 (+16.7%) at −0.8% judgeable-rate; **λ=1.0 collapses back to relevance-only**
+(diversity returns to 1.5) — the λ curve proves the parameter is real, and the flat
+0.3–0.7 plateau ("λ-insensitivity on this pool size") is itself a finding. See
+`docs/retrieval_ablation_report.md`.
+
+```bash
+python scripts/retrieval_ablation.py --offline --cache docs/retrieval_live.json   # 3s replay
+python scripts/retrieval_ablation.py --cache docs/retrieval_live.json --update   # refresh live snapshot
+```
+
+**Bad-case replay log:** `docs/bad_case_log.md` consolidates 20 fixed defects into
+**6 error patterns** (pretend-satisfy / pretend-unsatisfy / unreproducible numbers /
+invented reasons / display-vs-verdict mismatch / wrong semantic level), each with
+phenomenon → root cause → fix → regression test → lesson, anchored to commits.
 
 **Offline honesty proof (no Channel3 key / no network needed):**
 `scripts/satisfaction_golden.py` replays the **6 live bad cases** fixed on

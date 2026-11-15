@@ -50,7 +50,9 @@
 | 指标 | 数值 | 怎么复算 |
 |---|---|---|
 | 自动化测试 | **450 个**（基线 396 → +54） | `cd apps/server && python -m pytest -q` |
-| 质量门禁 | 20 句 × 真实检索，sat=91 / unsat=0 / unknown=12 | `python scripts/quality_gate.py`（需网络） |
+| 质量门禁 | 30 句 × 真实检索，三态判定 | `python scripts/quality_gate.py`（需网络；`scripts/quality_baseline.json` 为 20 句历史基线，扩容后重跑 `--json` 刷新） |
+| 检索/重排消融 | 20 句真网快照：MMR(λ≤0.7) 多样性 1.5→1.75（+16.7%），λ=1.0 退化 | `python scripts/retrieval_ablation.py --offline --cache docs/retrieval_live.json`（离线 3 秒；`--update` 重刷真网） |
+| Bad Case 复盘 | **20 项 × 6 类错误模式**（现象→根因→修复→防回归→教训） | `docs/bad_case_log.md`，每项有 commit 锚点 + 回归测试 |
 | 判定诚实性 golden | **7/7 通过**（6 现场 Bad Case → 0 残留） | `python scripts/satisfaction_golden.py`（离线） |
 | 检索韧性 | 硬超时 20s / 熔断 60s / 缓存 30min | 代码常量 + 韧性测试 |
 | 降级路径 | 3 态（ok/empty/error）+ 本地目录兜底 | `test_channel3_client_resilience.py` |
@@ -78,8 +80,9 @@
 2. **golden set 离线自检**：`scripts/satisfaction_golden.py` 把 6 个现场 Bad Case 的
    「修复前表现 → 根因 → 现在实判（含命中的 rule）」固化成 7 个场景，3 秒离线跑完，
    断网也能给评委当场演示「我们复盘过现场失败」。
-3. **真网质量门禁**：`scripts/quality_gate.py` 20 个模板句走真实抽取→检索→判定，
-   带 `--max-unknown/--min-sat` 断言可挂 CI。
+3. **真网质量门禁**：`scripts/quality_gate.py` 30 个模板句（2026-11-14 从 20 扩容，
+   每句标注「补哪个盲区」）走真实抽取→检索→判定，带 `--max-unknown/--min-sat`
+   断言可挂 CI。
 
 三层对应：单测保证「改坏了立刻红」、golden 保证「诚实性叙事可当场复算」、
 gate 保证「真实链路的全局不回归」。
