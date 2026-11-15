@@ -17,6 +17,14 @@ from __future__ import annotations
 
 import pytest
 
+# PG 双写测试需要 psycopg 驱动。缺失时整体 skip 而非 fail：pg_store 的
+# 防御性 import 保证模块能导入、函数能降级，测试用 importorskip 表达
+# "依赖前提不满足 → 跳过"，与 CI 精简依赖/psycopg 缺失场景保持一致。
+psycopg = pytest.importorskip(
+    "psycopg",
+    reason="PG 双写测试需要 psycopg；缺失时跳过而非失败",
+)
+
 from app.services.group_purchase import pg_store
 
 

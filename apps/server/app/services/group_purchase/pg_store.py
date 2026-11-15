@@ -20,9 +20,19 @@ import logging
 import os
 from typing import Any, Iterable
 
-from psycopg import connect
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
+# PG 双写是旁路增强：psycopg 缺失时整模块退化为纯 JSONL（与 audit_log 的旁路
+# 约定一致——PG 绝不能反过来卡 JSONL 主链路，也不能让 test collection 因缺驱动
+# 而炸成 pytest exit code 2）。psycopg 正常安装时下列名称照常可用。
+try:
+    from psycopg import connect
+    from psycopg.rows import dict_row
+    from psycopg.types.json import Jsonb
+    _PSYCOPG_AVAILABLE = True
+except Exception:  # pragma: no cover - psycopg 未安装时纯 JSONL 模式，不阻断主链路
+    connect = None  # type: ignore[assignment, misc]
+    dict_row = None  # type: ignore[assignment, misc]
+    Jsonb = None  # type: ignore[assignment, misc]
+    _PSYCOPG_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +87,8 @@ def pg_enabled() -> bool:
 
 def _connect():
     """短连接（数据量小：订单数百行、审计数千行，无需连接池）。"""
+    if not _PSYCOPG_AVAILABLE:
+        raise RuntimeError("psycopg 未安装，PG 后端不可用（纯 JSONL 模式）")
     url = get_database_url()
     if not url:
         raise RuntimeError("DATABASE_URL 未配置，PG 后端不可用")

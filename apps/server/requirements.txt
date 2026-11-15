@@ -61,5 +61,8 @@ numpy>=1.26.0
 # accelerate>=0.27  # 模型加载加速
 # Pillow>=10.0  # 图片处理
 
-# 注意：PostgreSQL 驱动已移除，项目使用 SQLite（内置）
-# 如需 PostgreSQL：pip install psycopg2-binary>=2.9.9
+# PostgreSQL 驱动：pg_store（PG 双写/P1-2 订单档案可查询）顶层 import psycopg，
+# 缺失会让 CI 收集阶段 import 失败 → pytest exit code 2。psycopg>=3.2 起默认随
+# 包安装 psycopg-binary（含 libpq），Linux/py3.13 无需系统依赖。
+# 周边链路（audit_log）对 psycopg 缺失做了旁路降级：JSONL 仍是主落盘。
+psycopg[binary]>=3.2,<4.0
