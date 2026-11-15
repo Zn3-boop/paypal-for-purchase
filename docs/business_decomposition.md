@@ -39,21 +39,23 @@
 | ②③ 检索 | 意图 → Channel3 query 构造（中英映射 + 规格注入）→ 候选池 | 检索错误 → `error` 三态 + 本地目录降级 + 文案「暂时不可用」；0 命中 → `empty`，不硬凑 |
 | ④ 约束抽取 | 意图 → 规则表 → 约束集（scope: total/per_item） | 抽不出 → 该条约束不进判定，不凭空造约束 |
 | ⑤ 判定 | 约束+商品 → 三态（sat/unsat/unknown）+ rule + 证据 | 无证据 → ❔（unknown），绝不假装 ✅；商品自述亮面 vs 哑光 → 确证 ❌ |
-| ⑥ 预算 | 组合总价 / 单件价 vs 预算上限 → 三重强制校验 | 超预算 → 拦截 + 审计；价差波动只提示（P1-1 才做支付前重校验） |
+| ⑥ 预算 | 组合总价 / 单件价 vs 预算上限 → 三重强制校验 | 超预算 → 拦截 + 审计；价差校验交给支付前重校验（P1-1，见 ⑨） |
 | ⑦ 方案 | 候选 → A/B 双方案 + MMR 重排 + 原因码 | 无可行方案 → `fallback`（不编造第二个方案） |
 | ⑧ HITL | 方案 → 用户批准/修改/拒绝 → 才创建订单 | 拒绝/修改 → 重新生成；金额被改 → `payment_amount_mismatch` 守卫 |
-| ⑨ 落档 | 订单+分摊+审计 → JSONL 追加 + PG 双写 | PG 不可用 → 纯 JSONL（CI/离线默认）；幂等去重 `insert_audit_if_absent` |
+| ⑨ 支付前重校验（P1-1） | 购物车 Channel3 商品 → 按 offer_url 实时回源（SDK lookup）→ 对比快照 | 缺货/下架 → `offer_unavailable` 拦截；单件涨幅 >10% 或整篮 >5% → `offer_price_changed` 拦截；回源失败 → 默认 fail-closed（`offer_recheck_failed`）；一致 → `offer_revalidated` 放行留痕 |
+| ⑩ 落档 | 订单+分摊+审计 → JSONL 追加 + PG 双写 | PG 不可用 → 纯 JSONL（CI/离线默认）；幂等去重 `insert_audit_if_absent` |
 
 ## 量化指标（全部可复算）
 
 | 指标 | 数值 | 怎么复算 |
 |---|---|---|
-| 自动化测试 | **436 个**（基线 396 → +40） | `cd apps/server && python -m pytest -q` |
+| 自动化测试 | **450 个**（基线 396 → +54） | `cd apps/server && python -m pytest -q` |
 | 质量门禁 | 20 句 × 真实检索，sat=91 / unsat=0 / unknown=12 | `python scripts/quality_gate.py`（需网络） |
 | 判定诚实性 golden | **7/7 通过**（6 现场 Bad Case → 0 残留） | `python scripts/satisfaction_golden.py`（离线） |
 | 检索韧性 | 硬超时 20s / 熔断 60s / 缓存 30min | 代码常量 + 韧性测试 |
 | 降级路径 | 3 态（ok/empty/error）+ 本地目录兜底 | `test_channel3_client_resilience.py` |
 | 审计守卫 | 金额不一致 → 拒绝标记 paid | `payment_amount_mismatch` 事件 |
+| 支付前重校验（P1-1） | 14 用例：缺货/涨价/整篮/fail-closed/fail-open/关闭无影响 | `tests/test_offer_recheck.py`（离线，fake fetch + TestClient） |
 | 持久化 | JSONL 追加 + PG 双写幂等 | `test_pg_store.py` / `test_restart_persistence.py` |
 | 单元级纯函数 | satisfaction 判定为纯函数（无副作用） | 模块 docstring 声明 |
 
@@ -65,7 +67,7 @@
    UI 文案 + 审计事件。评委看到「暂时不可用」能立刻明白发生了什么。
 3. **人在回路是安全边界**：AI 只做检索/比价/预算校验/方案生成，支付必须由用户在 PayPal
    页面确认；下单金额 ≠ 捕获金额 → 拒绝落 paid。这是「采购代理」与「自动花钱机器人」的分界线。
-4. **每个数字都有出处**：436 测试、7/7 golden、sat=91 都是脚本跑出来的，不是 PPT 数字。
+4. **每个数字都有出处**：450 测试、7/7 golden、sat=91 都是脚本跑出来的，不是 PPT 数字。
 ## 方法论：评测集 + 对照实验 + Bad Case 迭代（三层防线）
 
 对标成熟 RAG/检索项目的做法（评测集 → 对照实验 → Bad Case 定位 → 迭代量化），

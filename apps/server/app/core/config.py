@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     # 2026-11-10 实测时好时坏）。逗号分隔的固定 IP 列表：设置后在应用层绕过系统解析，
     # TLS 的 SNI/Host/证书校验仍基于域名本身 —— 不改 hosts、不关校验、无需管理员权限。
     channel3_dns_pin: str = ""
+    # ---------- P1-1 支付前 offer 重校验（2026-11-14） ----------
+    # 价格快照是「检索时点」的事实；从检索到真正付 PayPal 之间可能隔了十几分钟，
+    # 商家可能已改价/缺货。开启后 /paypal/create_order 会对 Channel3 商品按 offer_url
+    # 实时回源一次（SDK products.lookup），缺货/下架直接拦截，价差超阈值要求重新确认。
+    # 缺省关闭：回源是真实网络请求，会拖慢支付且在断网环境会误伤（demo 默认不挡路）；
+    # 严肃采购接入时打开。失败语义默认「无法校验 → 拦截」（fail-closed，诚实：没证据
+    # 就按最新快照扣款，是把"不知道"当成"没涨价"），也可用 *_FAIL_OPEN 改成放行+审计。
+    channel3_offer_recheck_enabled: bool = False
+    channel3_offer_recheck_max_single_rise: float = 0.10  # 单件涨幅 >10% 拦截
+    channel3_offer_recheck_max_basket_rise: float = 0.05  # 整篮涨幅 >5% 拦截
+    channel3_offer_recheck_fail_open: bool = False  # 回源失败时是否放行（默认拦截）
 
     # ---------- LLM (chat / agent replies) ----------
     llm_api_key: str = ""

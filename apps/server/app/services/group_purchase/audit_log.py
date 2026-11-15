@@ -47,6 +47,13 @@ AuditEventType = Literal[
     "intent_submitted",
     "payment_started",
     "payment_failed",
+    # P1-1 支付前 offer 重校验（2026-11-14）：三态 + 失败态独立成事件，
+    #   不混入 budget_violated —— 价差/缺货是「外部事实」，预算超支是「内部约束」，
+    #   审计时间线必须能区分「商家改价被拦截」与「预算不够被拦截」。
+    "offer_revalidated",     # 回源成功且价差/库存均 OK → 放行（留证据）
+    "offer_unavailable",     # 回源后发现缺货/下架 → 拦截（外部事实）
+    "offer_price_changed",   # 回源后发现价差超阈值 → 拦截（外部事实）
+    "offer_recheck_failed",  # 回源本身失败（网络/证书）→ 默认拦截，配 FAIL_OPEN 才放行
 ]
 
 
@@ -562,5 +569,123 @@ def log_payment_event(
             "mode": mode,
             "source": source,
             "reason": reason,
+        },
+    )
+def log_offer_revalidated(
+    session_id: str,
+    user_id: str,
+    actor: str,
+    *,
+    item_count: int,
+    snapshot_total: float,
+    live_total: float,
+    items: list[dict],
+) -> AuditLogEntry:
+    """P1-1 重校验放行证据（offer_revalidated）。
+
+    为什么放行也要留痕：支付前回源成功且价差/库存均 OK，是一条「我们确实在
+    支付前核对过」的事实。没有它，审计时间线上就看不到这笔支付「经过回源」，
+    出现「快照价与实扣价不一致」时无法自证核对过。
+    """
+    logger = get_audit_logger()
+    return logger.log(
+        session_id=session_id,
+        user_id=user_id,
+        actor=actor,
+        event="offer_revalidated",
+        data={
+            "item_count": item_count,
+            "snapshot_total": round(float(snapshot_total), 2),
+            "live_total": round(float(live_total), 2),
+            "items": items,
+        },
+    )
+
+
+def log_offer_unavailable(
+    session_id: str,
+    user_id: str,
+    actor: str,
+    *,
+    item_ids: list[str],
+    item_names: list[str],
+    cart_total: float,
+) -> AuditLogEntry:
+    """P1-1 缺货/下架拦截（offer_unavailable）：外部事实，独立于预算事件。"""
+    logger = get_audit_logger()
+    return logger.log(
+        session_id=session_id,
+        user_id=user_id,
+        actor=actor,
+        event="offer_unavailable",
+        data={
+            "item_ids": item_ids,
+            "item_names": item_names,
+            "cart_total": round(float(cart_total), 2),
+        },
+    )
+
+
+def log_offer_price_changed(
+    session_id: str,
+    user_id: str,
+    actor: str,
+    *,
+    changes: list[dict],
+    snapshot_total: float,
+    live_total: float,
+    basket_rise_pct: float | None,
+    max_single_rise: float,
+    max_basket_rise: float,
+    cart_total: float,
+) -> AuditLogEntry:
+    """P1-1 价差超阈值拦截（offer_price_changed）。
+
+    changes 每项含 id/name/snapshot_price/live_price/single_rise_pct：
+    审计流水可直接复算「哪件涨了多少、超没超阈值」。
+    """
+    logger = get_audit_logger()
+    return logger.log(
+        session_id=session_id,
+        user_id=user_id,
+        actor=actor,
+        event="offer_price_changed",
+        data={
+            "changes": changes,
+            "snapshot_total": round(float(snapshot_total), 2),
+            "live_total": round(float(live_total), 2),
+            "basket_rise_pct": round(float(basket_rise_pct), 4)
+            if basket_rise_pct is not None else None,
+            "max_single_rise": max_single_rise,
+            "max_basket_rise": max_basket_rise,
+            "cart_total": round(float(cart_total), 2),
+        },
+    )
+
+
+def log_offer_recheck_failed(
+    session_id: str,
+    user_id: str,
+    actor: str,
+    *,
+    error: str,
+    fail_open: bool,
+    message: str,
+) -> AuditLogEntry:
+    """P1-1 回源失败留痕（offer_recheck_failed）。
+
+    默认 fail-closed（无法确认 → 拦截支付）；显式配 FAIL_OPEN 才放行。
+    事件必须记录「采取了哪个语义」—— 否则审计无法区分「没拦」是配置还是疏漏。
+    """
+    logger = get_audit_logger()
+    return logger.log(
+        session_id=session_id,
+        user_id=user_id,
+        actor=actor,
+        event="offer_recheck_failed",
+        data={
+            "error": error,
+            "fail_open": bool(fail_open),
+            "message": message,
         },
     )

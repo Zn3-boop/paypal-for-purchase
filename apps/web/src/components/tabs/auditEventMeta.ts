@@ -14,4 +14,10 @@ export const EVENT_META: Record<string, { icon: string; color: string; label: st
   payment_started: { icon: '🚀', color: '#22D3EE', label: '支付发起', core: false },
   payment_failed: { icon: '⚠️', color: '#FB7185', label: '支付失败', core: false },
   payment_cancelled: { icon: '🚫', color: '#F59E0B', label: '支付取消', core: false },
+  payment_amount_mismatch: { icon: '🚧', color: '#F87171', label: '实扣不符', core: false },
+  // P1-1 支付前 offer 重校验（2026-11-14）：拦截类事件用 🚫，放行证据用 ✅
+  offer_revalidated: { icon: '✅', color: '#34D399', label: 'Offer 复核通过', core: false },
+  offer_unavailable: { icon: '🛑', color: '#EF4444', label: '商品缺货拦截', core: false },
+  offer_price_changed: { icon: '💰', color: '#F97316', label: '价格变动拦截', core: false },
+  offer_recheck_failed: { icon: '⛔', color: '#EF4444', label: '复核失败拦截', core: false },
 }

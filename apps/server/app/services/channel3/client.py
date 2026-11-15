@@ -345,6 +345,61 @@ class Channel3SearchClient:
         result = await self.search_products_with_status(query, limit)
         return result.items
 
+    # ---- P1-1 支付前 offer 回源（2026-11-14）----
+    async def lookup_product_offer(
+        self, offer_url: str, timeout: float = _CHANNEL3_HARD_TIMEOUT
+    ) -> tuple[float, str]:
+        """按商家 URL 实时回源价格与可用性（SDK products.lookup）。
+
+        P1-1 支付前重校验：create_order 之前对快照商品做一次真实回源。
+        走与检索同一套信任链（系统库→certifi，均 CERT_REQUIRED）+ 应用层 DNS pin，
+        校验链路的信任口径与选品链路完全一致，不单独开网络白名单。
+
+        返回 (最新单价, 可用性)："InStock"/"OutOfStock"；无 offer 视为不可售。
+        失败抛异常（信任链全部失败也抛），由调用方决定 fail-closed / fail-open。
+
+        realtime_fetch=True 强制回源、不走缓存 —— 支付守卫要的是「支付时点的事实」，
+        不是 30 分钟缓存；外层 hard timeout 与检索同口径，防网络抖动拖死支付。
+        """
+        return await asyncio.wait_for(
+            self._lookup_with_trust_chain(offer_url),
+            timeout=timeout,
+        )
+
+    async def _lookup_with_trust_chain(self, offer_url: str) -> tuple[float, str]:
+        """信任链循环：只看证书类失败换信任源；网络/超时异常直接上抛不蒙混。"""
+        cert_errors: list[str] = []
+        for index in range(len(self._contexts)):
+            try:
+                return await asyncio.to_thread(self._lookup_sync, offer_url, index)
+            except ssl.SSLCertVerificationError as exc:
+                # 只有"证书校验"才换信任来源重试；这是信任库差异，不是关校验。
+                cert_errors.append(str(exc))
+                logger.warning(
+                    "Channel3 lookup 信任来源 #%d 校验失败，回退下一个：%s", index + 1, exc
+                )
+                continue
+            except Exception as exc:
+                logger.warning("Channel3 lookup 失败（trust#%d）：%s", index + 1, exc)
+                raise
+        raise ssl.SSLCertVerificationError(
+            f"Channel3 lookup 全部信任来源校验失败：{cert_errors}"
+        )
+
+    def _lookup_sync(self, offer_url: str, index: int) -> tuple[float, str]:
+        """同步 lookup 一次（SDK 是同步客户端）；在 thread 里跑。"""
+        client = self._get_sdk(index)
+        resp = client.products.lookup(url=offer_url, realtime_fetch=True)
+        product = getattr(resp, "product", None)
+        offers = list(getattr(product, "offers", None) or [])
+        if not offers:
+            return (0.0, "OutOfStock")  # 无 offer 视为不可售
+        first = offers[0]
+        price_obj = getattr(first, "price", None)
+        price = float(getattr(price_obj, "price", 0.0) or 0.0)
+        availability = str(getattr(first, "availability", "") or "")
+        return (price, availability)
+
 
 def _normalize_product(p: Any) -> dict[str, Any]:
     try:

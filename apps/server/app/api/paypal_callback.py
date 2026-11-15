@@ -188,6 +188,144 @@ def _get_or_create_order(session, user_id: str, total: float, items: list[dict])
     return order
 
 
+async def _enforce_offer_recheck(
+    req: CreateOrderRequest,
+    settings,
+    cart_items: list[Any],
+    cart_total: float,
+) -> None:
+    """P1-1 支付前 offer 实时回源校验（在预算主门之后、建 PayPal 订单之前）。
+
+    为什么在这里而不是检索时：检索时点的快照对未来支付时刻没有约束力，
+    缺货/改价发生在「检索→支付」窗口里，唯一能把关的时机就是支付之前。
+
+    语义（与 budget_violated 分开成独立审计事件，Q&A 可复算）：
+      - 缺货/下架（availability != InStock）→ offer_unavailable + 拦截
+      - 单件涨幅 > 阈值 或 整篮涨幅 > 阈值 → offer_price_changed + 拦截
+      - 全部一致 → offer_revalidated + 放行（放行也要留痕：证明核对过）
+      - 回源本身失败 → 默认 fail-closed 拦截（无法确认 ≠ 没涨价）；
+        显式配 FAIL_OPEN 才放行（并把 fail_open 写进审计，供事后对账）
+    """
+    from app.services.channel3.offer_recheck import (
+        REASON_PRICE_CHANGED,
+        REASON_UNAVAILABLE,
+        recheck_cart_items,
+    )
+    from app.services.group_purchase.audit_log import (
+        log_offer_price_changed,
+        log_offer_recheck_failed,
+        log_offer_revalidated,
+        log_offer_unavailable,
+    )
+
+    user_id = req.user_email or "demo-user"
+    try:
+        from app.services.channel3.client import get_channel3_client
+
+        client = get_channel3_client()
+        verdict = await recheck_cart_items(
+            cart_items,
+            fetch=client.lookup_product_offer,
+            max_single_rise=settings.channel3_offer_recheck_max_single_rise,
+            max_basket_rise=settings.channel3_offer_recheck_max_basket_rise,
+        )
+    except Exception as exc:  # 回源失败：网络 / 证书 / 超时
+        fail_open = bool(settings.channel3_offer_recheck_fail_open)
+        log_offer_recheck_failed(
+            session_id=req.session_id,
+            user_id=user_id,
+            actor="paypal_callback",
+            error=f"{type(exc).__name__}: {exc}",
+            fail_open=fail_open,
+            message=(
+                "回源失败但已配置 FAIL_OPEN，继续按快照价创建 PayPal 订单"
+                if fail_open
+                else "回源失败，拦截支付（fail-closed）"
+            ),
+        )
+        if not fail_open:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "offer_recheck_failed",
+                    "message": (
+                        "🚧 支付前校验失败：暂时无法确认商品最新价格/库存，"
+                        "已拦截本次支付，避免按过期价格扣款。请稍后重试。"
+                    ),
+                },
+            )
+        logger.warning(
+            "P1-1 offer recheck failed but FAIL_OPEN: session=%s", req.session_id
+        )
+        return
+
+    if verdict.ok:
+        log_offer_revalidated(
+            session_id=req.session_id,
+            user_id=user_id,
+            actor="paypal_callback",
+            item_count=len(verdict.items),
+            snapshot_total=verdict.snapshot_total,
+            live_total=verdict.live_total,
+            items=[
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "snapshot_price": s.snapshot_price,
+                    "live_price": s.live_price,
+                    "availability": s.availability,
+                }
+                for s in verdict.items
+            ],
+        )
+        logger.info("P1-1 offer recheck passed: session=%s", req.session_id)
+        return
+
+    if verdict.reason == REASON_UNAVAILABLE:
+        blocked = [s for s in verdict.items if s.blocked]
+        log_offer_unavailable(
+            session_id=req.session_id,
+            user_id=user_id,
+            actor="paypal_callback",
+            item_ids=[s.id for s in blocked],
+            item_names=[s.name for s in blocked],
+            cart_total=cart_total,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "offer_unavailable", "message": verdict.message},
+        )
+
+    # price_changed（含单件超阈值与整篮超阈值）：审计记全量变动，便于复算
+    changes = [
+        {
+            "id": s.id,
+            "name": s.name,
+            "snapshot_price": s.snapshot_price,
+            "live_price": s.live_price,
+            "single_rise_pct": s.single_rise_pct,
+        }
+        for s in verdict.items
+        if s.blocked or s.single_rise_pct is not None
+    ]
+    log_offer_price_changed(
+        session_id=req.session_id,
+        user_id=user_id,
+        actor="paypal_callback",
+        changes=changes,
+        snapshot_total=verdict.snapshot_total,
+        live_total=verdict.live_total,
+        basket_rise_pct=verdict.basket_rise_pct,
+        max_single_rise=settings.channel3_offer_recheck_max_single_rise,
+        max_basket_rise=settings.channel3_offer_recheck_max_basket_rise,
+        cart_total=cart_total,
+    )
+    raise HTTPException(
+        status_code=400,
+        detail={"status": "offer_price_changed", "message": verdict.message},
+    )
+
+
 @router.get("/cart/total", tags=["paypal"])
 async def get_cart_total(session_id: str = Query(...)):
     """返回当前购物车总价（用于前端展示，不可用于创建订单）。"""
@@ -358,6 +496,13 @@ async def create_order(req: CreateOrderRequest, request: Request):
                         "fallback": budget_check["resolution"],
                     },
                 )
+
+        # P1-1 支付前 offer 实时回源（预算主门之后、建 PayPal 订单之前）：
+        # 快照价是「检索时点」的事实，缺货/改价发生在「检索→支付」窗口里没有兜底。
+        # 开启配置后，对 Channel3 商品按 offer_url 回源一次；缺货/价差超阈值即拦截。
+        # 回源失败默认 fail-closed（无法确认 ≠ 没涨价）。
+        if settings.channel3_offer_recheck_enabled:
+            await _enforce_offer_recheck(req, settings, cart_items, cart_total)
 
         # confirmed → paying：守卫 = check_budget PASS（budget_check=None 表示未设硬预算→放行）
         ok, msg = begin_payment(order, actor="system", budget_check=budget_check)

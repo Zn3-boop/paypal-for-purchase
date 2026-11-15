@@ -346,6 +346,31 @@ Channel3 results are filtered for relevance to the request, same-name + same-pri
 dropped, and items that came back but did not match are shown *separately* as "closest results"
 (`sponsor_related`) - they never enter a plan as if they were matches.
 
+### Pre-payment offer re-validation (P1-1, 2026-11-14)
+
+Prices/stock are snapshots taken at *search time*; the gap between search and actually paying PayPal
+can be minutes. Without a guard, an item could go out-of-stock or be re-priced in that window and the
+order would still be created at the stale price. When `CHANNEL3_OFFER_RECHECK_ENABLED=true`,
+`/paypal/create_order` re-validates Channel3 cart items via SDK `products.lookup` (realtime fetch,
+same trust chain as search) *before* creating the PayPal order:
+
+- out-of-stock / removed → blocked (`offer_unavailable` audit), user returns to the plan page;
+- single-item rise > `MAX_SINGLE_RISE` (10%) **or** basket rise > `MAX_BASKET_RISE` (5%) →
+  blocked (`offer_price_changed` audit with per-item snapshot→live details) and asks for reconfirmation;
+- all consistent → allowed with `offer_revalidated` audit **evidence** (revalidation must leave a trace);
+- re-fetch itself fails → default **fail-closed** (cannot confirm ≠ "did not rise"; `offer_recheck_failed`
+  audit, payment blocked), opt-in `FAIL_OPEN=true` to proceed with an audit note.
+
+Blocking happens only at payment time — the human-in-the-loop "change the cart and pay" path is untouched
+(the cart itself stays editable; the same philosophy as the budget guardrail). Regression:
+`tests/test_offer_recheck.py` (14 cases, offline, fake fetch + TestClient integration).
+
+> 价格/库存是「检索时点」快照；检索到真正付 PayPal 之间可能隔了十几分钟，缺货/改价没有兜底。
+> 开启上述配置后，建 PayPal 订单前对 Channel3 商品实时回源一次：缺货/下架拦截；单件涨幅 >10%
+> 或整篮 >5% 拦截并要求重新确认；回源一致放行并留 `offer_revalidated` 证据。回源失败默认
+> fail-closed 拦截（无法确认 ≠ 没涨价），可配 `FAIL_OPEN` 放行留痕。拦截只发生在支付时刻，
+> 不破坏「改到可接受再付」的人在回路。
+
 ## Disclaimer & Boundaries
 
 > 商品信息、库存与价格以 Channel3 检索时点快照及商家页面为准；最终成交金额以 PayPal 结算页为准。
@@ -461,6 +486,10 @@ demonstrates real restart-proof persistence rather than a page reload. Before fi
 | `CHANNEL3_COUNTRY` | (SDK 推断) | Channel3 市场（ISO 3166-1 alpha-2，如 `US`/`GB`/`DE`）；决定商品地区与币种推断 |
 | `CHANNEL3_CURRENCY` | (SDK 推断) | Channel3 报价币种（ISO 4217，如 `USD`/`EUR`）；留空由 country 推断 |
 | `CHANNEL3_DNS_PIN` | (empty) | 演示机 DNS 被污染时的应急：逗号分隔的真实 IP 列表，应用层固定 connect 目标（TLS/SNI/Host 仍按域名校验，不关校验、无需管理员权限）；正常网络留空 |
+| `CHANNEL3_OFFER_RECHECK_ENABLED` | `false` | P1-1 支付前 offer 重校验：开启后每次 `/paypal/create_order` 对 Channel3 商品按 `offer_url` 实时回源（SDK lookup），缺货/下架直接拦截；单件涨幅 > `CHANNEL3_OFFER_RECHECK_MAX_SINGLE_RISE` 或整篮 > `CHANNEL3_OFFER_RECHECK_MAX_BASKET_RISE` 拦截要求重新确认 |
+| `CHANNEL3_OFFER_RECHECK_MAX_SINGLE_RISE` | `0.10` | 单件价格涨幅阈值（超过即拦截，十进制小数） |
+| `CHANNEL3_OFFER_RECHECK_MAX_BASKET_RISE` | `0.05` | 整篮价格涨幅阈值（超过即拦截，十进制小数） |
+| `CHANNEL3_OFFER_RECHECK_FAIL_OPEN` | `false` | 回源失败语义：`false`=fail-closed（无法确认 → 拦截支付，默认，诚实）；`true`=放行并留 `offer_recheck_failed` 审计 |
 | `DATABASE_URL` | (empty) | PostgreSQL 连接串（如 `postgresql://postgres:xxx@localhost:5432/ecv_paypal`）。设置后订单/审计**双写** JSONL + PG；留空 → 纯 JSONL 模式（CI/离线测试默认） |
 
 ## Real Mode (for judges)
@@ -523,7 +552,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 436 tests
+python -m pytest -q        # 450 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
