@@ -9,7 +9,7 @@
 - **修复**：提交里实际改了什么。
 - **防回归**：对应的回归测试或门禁（`pytest` 用例 / `quality_gate` / golden）。
 
-## 总览（21 项）
+## 总览（22 项）
 
 | # | 分类 | Bad Case 一句话 | 修复 commit |
 |---|------|-----------------|------------|
@@ -34,6 +34,7 @@
 | 19 | 支付 | 检索与支付之间存在改价/缺货窗口，无兜底 | `96229fe`（P1-1 offer 重校验） |
 | 20 | 配置 | 区域配置写了但没透传到 SDK，商家外链被吞，免责声明缺失 | `855a4d8`（P0 收口） |
 | 21 | 依赖声明 | `pg_store` 顶层 import psycopg 但 requirements.txt 没声明 → CI 收集阶段炸（exit 2） | `6467b17` |
+| 22 | 测试环境前提 | 6 个测试依赖本地 `.env` 偶然凭据才绿：paypal 2 个真实 sandbox 联调误入默认套件、channel3 3 个无 key 被 disabled 短路、删单指令走 LLM 分支缺 key 构造即抛 → CI 干净环境全红（exit 1） | `46961ba` |
 
 ## 详情（节选：每个类挑一个典型展开）
 
@@ -95,6 +96,40 @@
   这个 no-op 契约根本没机会生效。「可选依赖」要成立必须三层齐备：**模块能导入、
   功能能降级、测试能跳过**。少任何一件，它就不是可选依赖，是隐藏的硬依赖。
 
+### 测试环境前提 —— 6 个凭据依赖测试在 CI 红（#22）
+
+- 现象：CI exit 1，6 个测试失败（453 个通过）：`ValueError: Missing PAYPAL
+  credentials`（2 个）、`status='disabled', 未配置 CHANNEL3_API_KEY`（3 个）、
+  `openai.OpenAIError: Missing credentials`（1 个）。本地 Windows 全绿（459）——
+  全部是「本地 `.env` 有真实凭据、CI 没有」的偶然差异。
+- 根因：三类各自「没声明测试前提」：
+  ① paypal 2 个是**真实 sandbox 联调**（真凭据 + 真调 `api-m.sandbox.paypal.com`），
+     文件头 `load_dotenv()` 读 `.env`，却没有任何 e2e 标记 —— `pytest.ini` 早有
+     `addopts = -m "not e2e"` 机制，它们被默认离线套件误收集；
+  ② channel3 resilience 3 个调**模块级函数** `search_products_with_status` →
+     `get_channel3_client()` 从 Settings 读 key，CI 无 key → `enabled=False` →
+     原实现 `not self.enabled` 在「熔断/探针」逻辑**之前**就返回 disabled，
+     patch 的 `_search_with_trust_chain` 根本不会被调用，测试走不到验证对象；
+  ③ `test_delete_instruction_still_works` 走 LLM 分支（「删掉 HD 300」不是
+     「只要 X」句式）→ `get_llm_client()` 构造 `AsyncOpenAI(api_key='')` →
+     openai 新版 `_enforce_credentials` 直接抛，LLM 失败后的规则兜底根本没机会执行。
+- 修复（`46961ba`）：
+  ① paypal 2 个标 `@pytest.mark.e2e`（默认 `-m "not e2e"` 排除；需真凭据时
+     `python -m pytest -m e2e` 显式激活）；
+  ② channel3 autouse fixture 显式 `monkeypatch.setenv("CHANNEL3_API_KEY",
+     "test-key")` + 重置模块单例（`get_settings` 默认 cache=False 每次全新读 env，
+     假 key 让 `enabled=True`，熔断/探针路径真正可达）；
+  ③ `test_delete_instruction_still_works` 把 `llm_parse_with_retry` mock 成不可用
+     （返回 `(None, raw)`）→ 验证「LLM 失败时规则兜底仍能删掉 HD 300」——这正是
+     该回归的本意，且不再依赖 `.env`。
+- 防回归：**无 .env 全量跑**（临时 rename `.env` 模拟 CI 干净环境）→ 457 passed +
+  2 deselected，与有 `.env` 的结果完全一致。口径：459 collected = 457 默认套件 +
+  2 e2e（`-m e2e` 显式激活）。
+- 教训：**测试的绿色不能来自「恰好 `.env` 有值」**。要么测试自给自足（显式注入
+  假凭据 / mock 依赖层），要么标记成 e2e 移出默认套件——CI 是提交合同，离线套件
+  必须在全新裸环境（无凭据、无网络）全绿。第 7 类管「import 层声明」，第 8 类管
+  「测试环境前提声明」，同一句原则：**契约必须兑现，不是看本地 `.env` 脸色**。
+
 ## 迭代闭环（怎么证明「迭代过」）
 
 1. 每个 Bad Case 先**钉死为回归测试**（复现 → 红 → 修复 → 绿）。
@@ -103,10 +138,10 @@
 4. `scripts/retrieval_ablation.py`（检索/重排策略消融）证明重排环节的选择有量化依据，
    而不是「拍脑袋加了个 MMR」。
 
-## 错误模式归因（7 类）——面试时这样讲
+## 错误模式归因（8 类）——面试时这样讲
 
-复盘不是流水账。「我修了 21 个 bug」是流水账；「我把 21 个问题归成 7 类错误模式，
-每一类对应一个判定层的设计约束」是工程思维。以下 7 类是项目全部 Bad Case 的归因：
+复盘不是流水账。「我修了 22 个 bug」是流水账；「我把 22 个问题归成 8 类错误模式，
+每一类对应一个判定层的设计约束」是工程思维。以下 8 类是项目全部 Bad Case 的归因：
 
 | # | 错误模式 | 表现 | 判定层设计约束 | 典型证据（commit） |
 |---|---------|------|--------------|-------------------|
@@ -117,6 +152,7 @@
 | 5 | 显示与判定不一致 | 同一事实两个说法 | 前端渲染只消费判定层的同一份 verdicts | `86ecc44`、`87aa2b8` |
 | 6 | 语义层级错位 | 把组合语义套到单件/把噪音当约束 | 约束建模区分组合层与逐件层 | `cb221b4`（规则原子化） |
 | 7 | 声明与实现不一致 | 文档/测试假设「可选依赖」，import 层却当硬依赖 | 可选依赖必须三层齐备：模块能导入、功能能降级、测试能跳过 | `6467b17` |
+| 8 | 测试环境前提未声明 | 本地 `.env` 偶然凭据让它绿，CI 干净环境红；live 联调要真凭据却混在离线套件 | 单元测试必须自给自足（显式注入假凭据 / mock 依赖层）；live 联调必须标 e2e 进默认排除 | `46961ba` |
 
 ## 五字段复盘模板（每类可展开成一个完整案例）
 

@@ -568,7 +568,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 459 tests
+python -m pytest -q        # 457 passed + 2 deselected e2e (= 459 collected; e2e needs live PayPal sandbox credentials, run with -m e2e)
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /

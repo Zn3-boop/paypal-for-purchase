@@ -49,10 +49,10 @@
 
 | 指标 | 数值 | 怎么复算 |
 |---|---|---|
-| 自动化测试 | **459 个**（基线 396 → +63） | `cd apps/server && python -m pytest -q` |
+| 自动化测试 | **459 collected**（默认套件 457 passed + 2 e2e 用 `-m e2e` 显式激活；基线 396 → +63） | `cd apps/server && python -m pytest -q` |
 | 质量门禁 | 30 句 × 真实检索，三态判定（基线 sat=122 / unsat=0 / unknown=26） | `python scripts/quality_gate.py`（需网络；`scripts/quality_baseline.json` 已随扩容刷新为 30 句口径） |
 | 检索/重排消融 | 20 句真网快照：MMR(λ≤0.7) 多样性 1.5→1.75（+16.7%），λ=1.0 退化 | `python scripts/retrieval_ablation.py --offline --cache docs/retrieval_live.json`（离线 3 秒；`--update` 重刷真网） |
-| Bad Case 复盘 | **21 项 × 7 类错误模式**（现象→根因→修复→防回归→教训；第 7 类「声明与实现不一致」= psycopg 未声明 → CI collection error） | `docs/bad_case_log.md`，每项有 commit 锚点 + 回归测试 |
+| Bad Case 复盘 | **22 项 × 8 类错误模式**（现象→根因→修复→防回归→教训；第 7 类「声明与实现不一致」= psycopg 未声明 → CI collection error；第 8 类「测试环境前提未声明」= 6 个凭据依赖测试在 CI 红 → 显式注入假凭据 / e2e 归位） | `docs/bad_case_log.md`，每项有 commit 锚点 + 回归测试 |
 | 判定诚实性 golden | **7/7 通过**（6 现场 Bad Case → 0 残留） | `python scripts/satisfaction_golden.py`（离线） |
 | 检索韧性 | 硬超时 20s / 熔断 60s / 缓存 30min / 429 限流冷却 30s（P1-3） | 代码常量 + `test_channel3_client_resilience.py` + `test_channel3_rate_limit.py` |
 | 降级路径 | 3 态（ok/empty/error）+ reason_code（rate_limited/limit_cooldown/circuit_open）+ 本地目录兜底 | `test_channel3_client_resilience.py` / `test_channel3_rate_limit.py` |
@@ -70,7 +70,7 @@
    UI 文案 + 审计事件。评委看到「暂时不可用」能立刻明白发生了什么。
 3. **人在回路是安全边界**：AI 只做检索/比价/预算校验/方案生成，支付必须由用户在 PayPal
    页面确认；下单金额 ≠ 捕获金额 → 拒绝落 paid。这是「采购代理」与「自动花钱机器人」的分界线。
-4. **每个数字都有出处**：459 测试、7/7 golden、sat=122、多样性 +16.7% 都是脚本跑出来的，不是 PPT 数字。
+4. **每个数字都有出处**：459 collected（457 默认套件 + 2 e2e）、7/7 golden、sat=122、多样性 +16.7% 都是脚本跑出来的，不是 PPT 数字。
 ## 方法论：评测集 + 对照实验 + Bad Case 迭代（三层防线）
 
 对标成熟 RAG/检索项目的做法（评测集 → 对照实验 → Bad Case 定位 → 迭代量化），
