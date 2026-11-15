@@ -641,9 +641,10 @@ python scripts/retrieval_ablation.py --offline --cache docs/retrieval_live.json 
 python scripts/retrieval_ablation.py --cache docs/retrieval_live.json --update   # refresh live snapshot
 ```
 
-**Bad-case replay log:** `docs/bad_case_log.md` consolidates 20 fixed defects into
-**6 error patterns** (pretend-satisfy / pretend-unsatisfy / unreproducible numbers /
-invented reasons / display-vs-verdict mismatch / wrong semantic level), each with
+**Bad-case replay log:** `docs/bad_case_log.md` consolidates 21 fixed defects into
+**7 error patterns** (pretend-satisfy / pretend-unsatisfy / unreproducible numbers /
+invented reasons / display-vs-verdict mismatch / wrong semantic level /
+declaration-vs-implementation mismatch), each with
 phenomenon → root cause → fix → regression test → lesson, anchored to commits.
 
 **Offline honesty proof (no Channel3 key / no network needed):**

@@ -52,7 +52,7 @@
 | 自动化测试 | **459 个**（基线 396 → +63） | `cd apps/server && python -m pytest -q` |
 | 质量门禁 | 30 句 × 真实检索，三态判定（基线 sat=122 / unsat=0 / unknown=26） | `python scripts/quality_gate.py`（需网络；`scripts/quality_baseline.json` 已随扩容刷新为 30 句口径） |
 | 检索/重排消融 | 20 句真网快照：MMR(λ≤0.7) 多样性 1.5→1.75（+16.7%），λ=1.0 退化 | `python scripts/retrieval_ablation.py --offline --cache docs/retrieval_live.json`（离线 3 秒；`--update` 重刷真网） |
-| Bad Case 复盘 | **20 项 × 6 类错误模式**（现象→根因→修复→防回归→教训） | `docs/bad_case_log.md`，每项有 commit 锚点 + 回归测试 |
+| Bad Case 复盘 | **21 项 × 7 类错误模式**（现象→根因→修复→防回归→教训；第 7 类「声明与实现不一致」= psycopg 未声明 → CI collection error） | `docs/bad_case_log.md`，每项有 commit 锚点 + 回归测试 |
 | 判定诚实性 golden | **7/7 通过**（6 现场 Bad Case → 0 残留） | `python scripts/satisfaction_golden.py`（离线） |
 | 检索韧性 | 硬超时 20s / 熔断 60s / 缓存 30min / 429 限流冷却 30s（P1-3） | 代码常量 + `test_channel3_client_resilience.py` + `test_channel3_rate_limit.py` |
 | 降级路径 | 3 态（ok/empty/error）+ reason_code（rate_limited/limit_cooldown/circuit_open）+ 本地目录兜底 | `test_channel3_client_resilience.py` / `test_channel3_rate_limit.py` |
