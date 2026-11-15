@@ -11,13 +11,13 @@ pydantic-settings>=2.0,<3.0
 
 # HTTP 客户端
 httpx>=0.27,<1.0
-openai>=1.58.0
+openai>=1.58.0,<3.0
 
 # 商品搜索（支付/选品链路 L1 真实商品来源；失败时本地 catalog 兜底）
 channel3-sdk>=4.5.0,<5.0.0
 
 # 本地快脑(Ollama 小模型 logprob 决策)
-ollama>=0.4
+ollama>=0.4,<1.0
 
 # Agent 图引擎（支付代理 StateGraph 运行时；缺失会让 CI 收集阶段
 # import 失败 → pytest exit code 2）
