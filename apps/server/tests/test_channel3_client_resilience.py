@@ -38,15 +38,23 @@ _PROBE_QUERY_KEY = channel3_module._cache_key("half open probe word", 20)
 
 
 @pytest.fixture(autouse=True)
-def _reset_channel3_circuit():
+def _reset_channel3_circuit(monkeypatch):
     """熔断状态是模块级全局：打开 60s 后，任何真实检索都会短路成 error。
 
     韧性测试恰恰需要「每次都真实走一遍失败路径」才能验证降级逻辑，
     所以每个用例前复位熔断，避免上一个用例的失败污染下一个。
     """
+    # 模块级便捷入口 get_channel3_client() 从 Settings 实时读 key
+    # （app.core.config.get_settings 默认 cache=False，每次全新构造）。
+    # CI 没有 .env，必须显式注入假 key —— 否则 search_products_with_status 在
+    # `not self.enabled`（未配置 CHANNEL3_API_KEY）就提前返回 disabled，
+    # 熔断/探针逻辑（本文件测试对象）根本走不到。单例因此需强制重建。
+    monkeypatch.setenv("CHANNEL3_API_KEY", "test-key")
+    channel3_module._channel3_client = None
     channel3_module._reset_circuit_breaker()
     yield
     channel3_module._reset_circuit_breaker()
+    channel3_module._channel3_client = None
 
 
 def _client() -> Channel3SearchClient:

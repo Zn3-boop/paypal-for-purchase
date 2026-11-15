@@ -8,6 +8,7 @@ load_dotenv()
 
 from app.services.paypal_gateway import get_paypal_gateway
 
+@pytest.mark.e2e  # 真实 PayPal sandbox：需 PAYPAL_SANDBOX_CLIENT_ID/SECRET + 网络，默认 -m "not e2e" 排除
 @pytest.mark.asyncio
 async def test_paypal_sandbox_order_creation():
     """测试创建 PayPal Sandbox 订单 (1 美元)。"""

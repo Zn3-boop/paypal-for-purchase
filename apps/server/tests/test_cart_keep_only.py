@@ -125,10 +125,23 @@ def test_keep_only_when_already_satisfied_is_not_reported_as_noop_failure():
 
 
 def test_delete_instruction_still_works():
-    """回归：非「只要」句式仍走原删除路径。"""
+    """回归：非「只要」句式仍走原删除路径。
+
+    本地 .env 有 LLM_API_KEY 时这条用例走「LLM 解析成功」路径；
+    CI / 干净环境没有凭据，get_llm_client() 构造即抛 Missing credentials。
+    这里把 LLM 层显式打成「不可用」：解析失败后必须降级到规则兜底
+    （cart_modifier._fallback_rule_based_parse，"删掉 X" → delete_item），
+    验证的正是「即使 LLM 不工作，删除指令也不会丢」这条真契约。
+    """
+    from unittest.mock import patch
+
     _session("keep-delete", [DJ, HD])
 
-    out = _modify("keep-delete", "删掉 HD 300")
+    async def _llm_unavailable(*_args, **_kwargs):
+        return None, {"error": "mocked-offline"}
+
+    with patch("app.services.llm.client.llm_parse_with_retry", new=_llm_unavailable):
+        out = _modify("keep-delete", "删掉 HD 300")
 
     assert out["success"] is True
     assert _names(out) == [DJ.name]

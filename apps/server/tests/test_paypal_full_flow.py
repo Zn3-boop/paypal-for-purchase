@@ -6,6 +6,7 @@ load_dotenv()
 
 from app.services.paypal_gateway import get_paypal_gateway
 
+@pytest.mark.e2e  # 真实 PayPal sandbox：需 PAYPAL_SANDBOX_CLIENT_ID/SECRET + 网络，默认 -m "not e2e" 排除
 @pytest.mark.asyncio
 async def test_paypal_full_flow_create_and_capture():
     """完整 PayPal 流程：创建订单 -> (模拟批准) -> 捕获订单"""
