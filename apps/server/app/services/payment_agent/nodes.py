@@ -232,6 +232,32 @@ def _rule_parse_intent(raw_query: str) -> dict[str, Any]:
 # 节点 2：taste_select —— 候选商品选择
 # ============================================================
 
+def _audit_channel3_rate_limited(
+    state: dict[str, Any], query: str, result: Any
+) -> None:
+    """429 限流降级留痕（审计旁路，绝不阻塞主链路）。
+
+    P1-3（2026-11-15）：限流是「上游忙」不是故障，事件独立于 fallback_triggered，
+    data 里带 reason_code 供审计时间轴区分「限流」与「普通故障」。
+    """
+    try:
+        from app.services.group_purchase.audit_log import get_audit_logger
+
+        get_audit_logger().log(
+            session_id=str(state.get("session_id") or "unknown"),
+            user_id=str(state.get("user_id") or "unknown"),
+            actor="system",
+            event="channel3_rate_limited",
+            data={
+                "query": query,
+                "reason_code": result.reason_code,
+                "fallback": "local_ranker",
+            },
+        )
+    except Exception:  # pragma: no cover - 审计旁路不阻塞主链路
+        logger.warning("channel3 rate-limit audit write failed", exc_info=True)
+
+
 async def taste_select_node(state: dict[str, Any]) -> dict[str, Any]:
     """候选商品选择：L1 Channel3 真实搜索 -> 降级 L2 本地排序。
 
@@ -254,12 +280,16 @@ async def taste_select_node(state: dict[str, Any]) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     try:
         # L1：Channel3 真实商品搜索（有 key 才执行，失败自动降级 L2）
-        from app.services.channel3 import search_products_for_query
+        from app.services.channel3 import search_products_with_status
 
         query = " ".join(keywords) if keywords else category
-        channel3_items = await search_products_for_query(query, limit=8)
-        if channel3_items:
-            candidates = channel3_items
+        result = await search_products_with_status(query, limit=8)
+        # P1-3（2026-11-15）：429 限流显式降级 —— 降级原因进审计，
+        # 不混同于 general error（fallback_triggered 早已存在，这里补的是**原因**）。
+        if result.reason_code in ("rate_limited", "limit_cooldown"):
+            _audit_channel3_rate_limited(state, query, result)
+        if result.items:
+            candidates = result.items
             rank_source = "channel3"
     except Exception:  # pragma: no cover - Channel3 挂了不影响本节点
         logger.warning("Channel3 增强失败，降级 L2 本地 catalog")

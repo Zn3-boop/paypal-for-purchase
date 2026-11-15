@@ -54,6 +54,9 @@ AuditEventType = Literal[
     "offer_unavailable",     # 回源后发现缺货/下架 → 拦截（外部事实）
     "offer_price_changed",   # 回源后发现价差超阈值 → 拦截（外部事实）
     "offer_recheck_failed",  # 回源本身失败（网络/证书）→ 默认拦截，配 FAIL_OPEN 才放行
+    # P1-3 检索限流（2026-11-15）：Channel3 返回 429 或被限流冷却拦截 → 降级本地目录。
+    # 独立成事件，区别于 fallback_triggered —— 429 是「上游忙」的可恢复节流，不是故障
+    "channel3_rate_limited",
 ]
 
 

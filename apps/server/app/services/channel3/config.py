@@ -19,6 +19,10 @@ class Channel3Config:
     # 应用层 DNS pin：系统解析被污染时固定连到真实 IP（TLS 校验不放松）。
     # 空元组 = 不启用，走系统解析。
     dns_pin: tuple[str, ...] = ()
+    # P1-3（2026-11-15）429 限流显式降级：限流是「上游忙」不是故障，
+    # 独立短冷却（rate_limit_cooldown_seconds）而非 60s 熔断。
+    rate_limit_degrade_enabled: bool = True
+    rate_limit_cooldown_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> Channel3Config:
@@ -38,6 +42,8 @@ class Channel3Config:
                 for ip in (settings.channel3_dns_pin or "").split(",")
                 if ip.strip()
             ),
+            rate_limit_degrade_enabled=settings.channel3_rate_limit_degrade_enabled,
+            rate_limit_cooldown_seconds=settings.channel3_rate_limit_cooldown_seconds,
         )
 
     @property

@@ -3,8 +3,8 @@
 评测集（2026-11-14 从 20 扩容到 30）每条都有一个明确盲区：
   - 服/数/生/团 = 品类与约束模式；多/惑 = 边界句（季节噪音 / 矛盾反证）；
   - 盲区写在 SCENARIOS 逐条注释里（「补哪个盲区」，面试可讲，拒绝注水扩容）。
-旧基线 `scripts/quality_baseline.json` 是 20 句快照；扩容后重跑 `--json` 会得到
-30 句口径的新统计。
+旧基线（20 句，sat=91/unknown=12）已随 2026-11-15 扩容刷新为 30 句口径
+（sat=122 / unsat=0 / unknown=26，见 scripts/quality_baseline.json）。
 
 这是把散落在 .tmp/template_audit.py 的临时审计正式化成的工程组件，
 同时修掉了原脚本的两个缺陷（2026-11-13）：
@@ -20,8 +20,10 @@
 用法：
     python scripts/quality_gate.py                      # 人类可读报告
     python scripts/quality_gate.py --json out.json      # 机器可读基线
-    python scripts/quality_gate.py --max-unknown 10 --min-sat 85
-        # 断言模式：unknown 超过 10 或 sat 低于 85 时退出码 1（CI 可挂）。
+    python scripts/quality_gate.py --max-unknown 30 --min-sat 85
+        # 断言模式：unknown 超过 30 或 sat 低于 85 时退出码 1（CI 可挂）。
+        # 数值口径 = 30 句基线（unknown=26）+ 松弛 4；unknown 是从 26 涨到 31 才挂，
+        # unsat 才是硬质量门（基线 0）；unknown 是"缺字段/主观词"的诚实 ❔，有真实检索波动。
 
 需要网络（Channel3 API）。这是线下基线工具，不是解耦单元测试的替代品。
 """

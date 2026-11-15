@@ -84,6 +84,15 @@ class Settings(BaseSettings):
     channel3_offer_recheck_max_basket_rise: float = 0.05  # 整篮涨幅 >5% 拦截
     channel3_offer_recheck_fail_open: bool = False  # 回源失败时是否放行（默认拦截）
 
+    # ---------- P1-3 Channel3 429 限流显式降级（2026-11-15） ----------
+    # 熔断（60s）针对**故障**（5xx/网络/超时）；429 限流是「上游忙」不是故障，
+    # 不该打开熔断把后续请求全部短路 60s。开启后 429 走独立短冷却（默认 30s），
+    # 冷却期内直接降级本地目录（reason_code=limit_cooldown），冷却结束自动恢复；
+    # 429 本身记为 reason_code=rate_limited，审计/面板可区分「限流」与「故障」。
+    # 默认开启：只细分已有错误路径，不改变正常请求；关闭后 429 并入普通错误（熔断）。
+    channel3_rate_limit_degrade_enabled: bool = True
+    channel3_rate_limit_cooldown_seconds: float = 30.0
+
     # ---------- LLM (chat / agent replies) ----------
     llm_api_key: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"

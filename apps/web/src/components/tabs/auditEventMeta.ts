@@ -20,4 +20,6 @@ export const EVENT_META: Record<string, { icon: string; color: string; label: st
   offer_unavailable: { icon: '🛑', color: '#EF4444', label: '商品缺货拦截', core: false },
   offer_price_changed: { icon: '💰', color: '#F97316', label: '价格变动拦截', core: false },
   offer_recheck_failed: { icon: '⛔', color: '#EF4444', label: '复核失败拦截', core: false },
+  // P1-3 检索限流（2026-11-15）：上游 429 → 显式降级，冷却后自动恢复
+  channel3_rate_limited: { icon: '⏳', color: '#FBBF24', label: '检索限流降级', core: false },
 }

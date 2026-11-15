@@ -197,6 +197,22 @@ writes the existing `cart_modified` audit event with
 `test_force_probe_keeps_circuit_open_on_failure`、
 `test_force_probe_flag_flows_from_regenerate_to_planner`。
 
+### 429 限流显式降级（P1-3，独立于熔断的短冷却）
+
+**429 ≠ 故障**：5xx/网络/超时是「上游疑似坏了」（60s 熔断 + 半开探针）；
+429 是「上游忙、配额满了」，不该打开熔断把 60s 内所有请求打进本地目录（过度降级）。
+P1-3（2026-11-15）把限流从故障里拆出来：
+
+- **独立短冷却**（默认 30s，`CHANNEL3_RATE_LIMIT_COOLDOWN_SECONDS` 可配）：429 后窗口内短路降级本地目录，冷却结束**自动恢复**（不需要半开探针——那不是故障）；
+- **reason_code 结构化**：`Channel3Result.reason_code` = `rate_limited`（本次真实收到 429）/
+  `limit_cooldown`（冷却期内拦截）/ `circuit_open`（熔断期内拦截），上层不再解析 message 字符串；
+- **审计独立事件** `channel3_rate_limited`（区别于 `fallback_triggered`）：data 带 `reason_code` 与 `fallback=local_ranker`，审计时间轴能区分「限流」与「故障」；
+- **force_probe 穿透冷却**（与熔断同语义）：用户显式「重新生成方案」可立即重试一次；
+- **开关** `CHANNEL3_RATE_LIMIT_DEGRADE_ENABLED`（默认开）：关闭则 429 并入普通错误路径（走熔断）。
+
+回归：`tests/test_channel3_rate_limit.py`（R1 不打开熔断 / R2 冷却跳网 / R3 探针穿透 /
+R4 冷却过期自恢复 / R5 成功双复位 / R6 开关关闭走熔断 / R7 status 提取 / R8+R8b 审计入账）。
+
 ### 规格 B/C：MMR 重排 + 每张卡一个可复算原因码
 
 泳道的**排序**和**理由**都不是模型黑盒 —— 判定式全是纯函数，README 各一行：
@@ -552,7 +568,7 @@ judges); secrets for the merchant app belong in `apps/server/.env` and **never i
 
 ```bash
 cd apps/server
-python -m pytest -q        # 450 tests
+python -m pytest -q        # 459 tests
 ```
 
 Covered: payment-intent routing, authority verdict routing (block / allow_auto /
@@ -592,11 +608,13 @@ verdicts — and sums the three status buckets. It doubles as a CI assertion gat
 
 ```bash
 python scripts/quality_gate.py --json scripts/quality_baseline.json   # human + machine baseline
-python scripts/quality_gate.py --max-unknown 15 --min-sat 85          # fail (exit 1) if regression
+python scripts/quality_gate.py --max-unknown 30 --min-sat 85          # fail (exit 1) if regression
+# 阈值口径 = 30 句基线 unknown=26 + 松弛 4（unsat 才是硬门，基线 0）
 ```
 
-Baseline (2026-11-13, 20-sentence snapshot): **sat=91, unsat=0, unknown=12** across 103
-constraint judgments; re-run `--json` after the 30-sentence expansion to refresh.
+Baseline (2026-11-15, 30-sentence snapshot, refreshed after the expansion): **sat=122,
+unsat=0, unknown=26** across 172 constraint judgments (the former 20-sentence
+sat=91/unknown=12 baseline is superseded; re-run `--json` whenever the scenario set changes).
 `unsat=0` is meaningful because the gate *mirrors the real planner's budget prefilter*
 (`prefilter_by_constraints` drops items priced above a hard budget before judging), so
 "7 items over budget" shows up as fewer in-budget candidates, not as a false verdict that

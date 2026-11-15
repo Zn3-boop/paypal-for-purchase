@@ -75,6 +75,47 @@ def _reset_circuit_breaker() -> None:
     global _last_failure_at
     _last_failure_at = None
 
+
+# ---------------------------------------------------------------------------
+# P1-3（2026-11-15）：429 限流与熔断解耦。
+#   熔断 = 「上游疑似故障」（5xx/网络/超时），60s 短路 + 半开探针；
+#   限流 = 「上游忙，配额满了」，独立短冷却（默认 30s），冷却结束自动恢复，
+#   不需要半开探针——它不是故障，只是需要等一等。429 不打开熔断，
+#   否则一个瞬时限流会把 60s 内的所有请求全部打进本地目录（过度降级）。
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_COOLDOWN_SECONDS = 30.0
+_rate_limited_at: float | None = None
+
+
+def _extract_status_code(exc: BaseException) -> int | None:
+    """从异常提取 HTTP 状态码（httpx.HTTPStatusError.response.status_code /
+    裸 status_code 属性）；拿不到返回 None。"""
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(exc, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _note_rate_limited() -> None:
+    """记录一次 429（幂等：已在冷却窗口内不重置计时——与熔断同语义）。"""
+    global _rate_limited_at
+    if _rate_limited_at is not None:
+        return
+    _rate_limited_at = monotonic()
+
+
+def _rate_limit_open(cooldown: float = _RATE_LIMIT_COOLDOWN_SECONDS) -> bool:
+    """距上次 429 仍在冷却窗口内 → 短路，不再发真实请求。"""
+    return _rate_limited_at is not None and (monotonic() - _rate_limited_at) < cooldown
+
+
+def _reset_rate_limit() -> None:
+    """清空限流冷却（真实请求成功/empty 时调用）。"""
+    global _rate_limited_at
+    _rate_limited_at = None
+
 # 硬超时：无论 SDK 内部怎么重试，整体检索最迟这么久必须返回。
 # 网络抖动时防止 GET /plans 生成链路被拖到 60s+ 挂死
 # （UI 表现为「⏳ 等待生成方案」永远转圈 —— 录屏现场排查过根因就在这里）。
@@ -85,11 +126,20 @@ _CHANNEL3_HARD_TIMEOUT = 20.0
 
 @dataclass
 class Channel3Result:
-    """一次检索的结果 + 状态（items 为空时 status 仍然有意义）。"""
+    """一次检索的结果 + 状态（items 为空时 status 仍然有意义）。
+
+    reason_code（P1-3，2026-11-15）：结构化失败原因，与 message 分离。
+      - ""              成功/空（无失败）
+      - "circuit_open"  60s 熔断期内直接降级
+      - "limit_cooldown" 429 限流冷却期内直接降级
+      - "rate_limited"  本次请求真实收到 HTTP 429
+    上层（审计/面板）据此区分「故障」与「限流」，不必解析 message 字符串。
+    """
 
     items: list[dict[str, Any]] = field(default_factory=list)
     status: str = CHANNEL3_OK
     message: str = ""
+    reason_code: str = ""
 
     @property
     def ok(self) -> bool:
@@ -285,9 +335,28 @@ class Channel3SearchClient:
             return Channel3Result(
                 [], CHANNEL3_ERROR,
                 f"Channel3 60s 熔断期内（上轮检索失败），已直接降级本地目录；稍后可重试",
+                reason_code="circuit_open",
             )
         if _circuit_open() and force_probe:
             logger.info("Channel3 半开探针：用户显式重试，放行一次真实检索")
+
+        # P1-3：429 限流冷却（独立于熔断，短窗口）。force_probe 穿透，与熔断同语义。
+        if (
+            self._config.rate_limit_degrade_enabled
+            and _rate_limit_open(self._config.rate_limit_cooldown_seconds)
+            and not force_probe
+        ):
+            logger.warning(
+                "Channel3 限流冷却中（上次 429 后 %.0fs 内），跳过真实检索，降级本地目录",
+                self._config.rate_limit_cooldown_seconds,
+            )
+            return Channel3Result(
+                [], CHANNEL3_ERROR,
+                "Channel3 限流冷却期内（上游 429 后 30s），已降级本地目录；冷却结束自动恢复",
+                reason_code="limit_cooldown",
+            )
+        if _rate_limit_open(self._config.rate_limit_cooldown_seconds) and force_probe:
+            logger.info("Channel3 限流冷却期内用户显式重试（force_probe），放行一次真实检索")
 
         try:
             result = await asyncio.wait_for(
@@ -302,11 +371,12 @@ class Channel3SearchClient:
             )
             return Channel3Result([], CHANNEL3_ERROR, "Channel3 检索超时（网络抖动），已降级本地目录")
 
-        # 半开语义的「成功即关」：只要有真实请求存活（ok/empty），熔断就是干净的。
-        # 失败路径已在 _search_with_trust_chain 里 _note_channel3_failure()，幂等且
-        # 不重置 60s 窗口 → 维持短路。这里只在成功时复位，正是探针想达成的事。
+        # 半开语义的「成功即关」：只要有真实请求存活（ok/empty），熔断与限流冷却
+        # 都是干净的。失败路径已在 _search_with_trust_chain 里分别 _note_*()，
+        # 幂等且不重置窗口 → 维持短路/冷却。这里只在成功时复位。
         if result.status != CHANNEL3_ERROR:
             _reset_circuit_breaker()
+            _reset_rate_limit()
         return result
 
     async def _search_with_trust_chain(self, query: str, limit: int) -> Channel3Result:
@@ -332,6 +402,15 @@ class Channel3SearchClient:
                 )
                 continue
             except Exception as exc:
+                # P1-3：429 是「上游忙」不是故障 —— 记限流冷却（短窗口），不打开 60s 熔断。
+                if _extract_status_code(exc) == 429 and self._config.rate_limit_degrade_enabled:
+                    _note_rate_limited()
+                    logger.warning("Channel3 被限流（HTTP 429），进入限流冷却：%s", exc)
+                    return Channel3Result(
+                        [], CHANNEL3_ERROR,
+                        "Channel3 被限流（HTTP 429），已降级本地目录；冷却结束后自动恢复",
+                        reason_code="rate_limited",
+                    )
                 _note_channel3_failure()
                 logger.warning("Channel3 检索失败：%s", exc)
                 return Channel3Result([], CHANNEL3_ERROR, f"请求失败：{type(exc).__name__}")

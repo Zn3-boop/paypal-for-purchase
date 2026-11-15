@@ -31,6 +31,11 @@ from app.services.payment_agent.nodes import (  # noqa: E402
     parse_intent_node,
     taste_select_node,
 )
+from app.services.channel3.client import (  # noqa: E402
+    CHANNEL3_EMPTY,
+    CHANNEL3_OK,
+    Channel3Result,
+)
 
 # 一条归一化后的 Channel3 商品样例（与 client._normalize_product 输出同构）
 _CHANNEL3_ITEM = {
@@ -84,8 +89,8 @@ async def test_t1_no_key_falls_back_to_local_catalog():
 
     # 强制 L1 空结果（等价于无 key / 搜索无命中）
     with patch(
-        "app.services.channel3.search_products_for_query",
-        new=AsyncMock(return_value=[]),
+        "app.services.channel3.search_products_with_status",
+        new=AsyncMock(return_value=Channel3Result([], CHANNEL3_EMPTY, "")),
     ):
         out = await taste_select_node(state)
 
@@ -101,8 +106,8 @@ async def test_t1b_out_of_catalog_query_is_honestly_empty():
     state = await _intent_state()  # _BASE_STATE = 降噪耳机（目录外品类）
 
     with patch(
-        "app.services.channel3.search_products_for_query",
-        new=AsyncMock(return_value=[]),
+        "app.services.channel3.search_products_with_status",
+        new=AsyncMock(return_value=Channel3Result([], CHANNEL3_EMPTY, "")),
     ):
         out = await taste_select_node(state)
 
@@ -122,8 +127,8 @@ async def test_t2_channel3_l1_success():
     state = await _intent_state()
 
     with patch(
-        "app.services.channel3.search_products_for_query",
-        new=AsyncMock(return_value=[_CHANNEL3_ITEM]),
+        "app.services.channel3.search_products_with_status",
+        new=AsyncMock(return_value=Channel3Result([_CHANNEL3_ITEM], CHANNEL3_OK, "")),
     ):
         out = await taste_select_node(state)
 
@@ -151,7 +156,7 @@ async def test_t3_channel3_exception_degrades_not_crash():
     logger.addHandler(handler)
     try:
         with patch(
-            "app.services.channel3.search_products_for_query",
+            "app.services.channel3.search_products_with_status",
             new=AsyncMock(side_effect=TimeoutError("channel3 timeout")),
         ):
             out = await taste_select_node(state)
@@ -178,8 +183,8 @@ async def test_t6_panel_exposes_sources():
     state = await _intent_state()
 
     with patch(
-        "app.services.channel3.search_products_for_query",
-        new=AsyncMock(return_value=[_CHANNEL3_ITEM]),
+        "app.services.channel3.search_products_with_status",
+        new=AsyncMock(return_value=Channel3Result([_CHANNEL3_ITEM], CHANNEL3_OK, "")),
     ):
         r = await taste_select_node(state)
     state = {**state, **r}
